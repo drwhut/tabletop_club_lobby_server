@@ -14,6 +14,11 @@ edition = "2021"
 rust-version = "1.63"
 
 [dependencies]
+fastrand = "2.0.1"
+futures-util = { version = "0.3", default-features = false }
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = "0.21.0"
+tracing = "0.1.40"
 
 [[bin]]
 name = "ttc-lobby"

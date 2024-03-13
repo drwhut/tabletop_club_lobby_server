@@ -21,11 +21,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-use tabletop_club_lobby_server::connection::listen;
-
-#[tokio::main]
-async fn main() -> Result<(), std::io::Error> {
-    listen().await?;
-
-    Ok(())
-}
+pub mod connection;
+pub mod message;
+pub mod player;
+pub mod room;
