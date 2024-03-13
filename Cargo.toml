@@ -1,0 +1,20 @@
+[package]
+name = "tabletop_club_lobby_server"
+version = "0.1.0"
+
+authors = ["Benjamin 'drwhut' Beddows"]
+description = "A WebRTC signalling server for Tabletop Club that allows players to connect peer-to-peer with the use of room codes."
+repository = "https://github.com/drwhut/tabletop_club_lobby_server"
+license = "MIT"
+
+keywords = ["lobby", "server", "webrtc", "websocket"]
+categories = ["command-line-utilities", "web-programming::websocket"]
+
+edition = "2021"
+rust-version = "1.63"
+
+[dependencies]
+
+[[bin]]
+name = "ttc-lobby"
+path = "src/main.rs"
