@@ -21,4 +21,14 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-pub enum LobbyRequest {}
+use crate::room::RoomCode;
+
+pub enum LobbyCommand {
+    CreateRoom,
+    JoinRoom(RoomCode),
+}
+
+pub struct LobbyRequest {
+    pub handle_id: u32,
+    pub command: LobbyCommand,
+}

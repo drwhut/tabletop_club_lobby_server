@@ -21,7 +21,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-use crate::message::LobbyRequest;
+use crate::message::{LobbyCommand, LobbyRequest};
 
 use futures_util::sink::{Close, SinkExt};
 use futures_util::stream::StreamExt;
@@ -40,6 +40,15 @@ pub type HandleID = u32;
 pub type PlayerID = u32;
 
 pub type PlayerStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+pub enum ParseError {
+    NoNewline,
+    NoSpace,
+    UnexpectedPayload,
+    NotInLobby,
+    InvalidCommand,
+    InvalidArgument,
+}
 
 #[derive(Debug)]
 pub struct Context {
@@ -63,15 +72,39 @@ impl Player {
         }
     }
 
-    #[tracing::instrument]
+    pub fn handle(&mut self) -> &mut JoinHandle<()> {
+        &mut self.handle
+    }
+
+    #[tracing::instrument(level = "trace", skip(context))]
     async fn task(mut context: Context) {
         let timeout_duration = *context.timeout_watch.borrow_and_update();
 
         let should_exit: Option<bool> = tokio::select! {
             res = timeout(timeout_duration, context.client_stream.next()) => {
-                if let Ok(stream_data) = res {
-                    println!("{:?}", stream_data);
-                    None
+                if let Ok(stream_res) = res {
+                    println!("{:?}", stream_res);
+
+                    if let Some(message) = stream_res {
+                        match message {
+                            Ok(message) => {
+                                match message {
+                                    Message::Text(text) => {
+                                        None
+                                    },
+                                    _ => None,
+                                }
+                            },
+                            Err(e) => {
+                                // Protocol error.
+                                None
+                            },
+                        }
+                    } else {
+                        // No more items can be gotten from the stream.
+                        println!("Stream closed!");
+                        Some(false)
+                    }
                 } else {
                     let close_msg = Message::Close(Some(CloseFrame{
                         code: CloseCode::Library(4002),
@@ -105,7 +138,38 @@ impl Player {
         );
     }
 
-    pub fn handle(&mut self) -> &mut JoinHandle<()> {
-        &mut self.handle
+    fn parse_lobby_message(msg: &str) -> Result<LobbyCommand, ParseError> {
+        if let Some((first_line, rest)) = msg.split_once('\n') {
+            if !rest.is_empty() {
+                return Err(ParseError::UnexpectedPayload);
+            }
+
+            if let Some((command, argument)) = first_line.split_once(' ') {
+                match command {
+                    "J:" => {
+                        if argument.is_empty() {
+                            Ok(LobbyCommand::CreateRoom)
+                        } else if argument.len() == 4 {
+                            if let Ok(room_code) = argument.try_into() {
+                                Ok(LobbyCommand::JoinRoom(room_code))
+                            } else {
+                                Err(ParseError::InvalidArgument)
+                            }
+                        } else {
+                            Err(ParseError::InvalidArgument)
+                        }
+                    }
+                    "S:" => Err(ParseError::NotInLobby),
+                    "O:" => Err(ParseError::NotInLobby),
+                    "A:" => Err(ParseError::NotInLobby),
+                    "C:" => Err(ParseError::NotInLobby),
+                    _ => Err(ParseError::InvalidCommand),
+                }
+            } else {
+                Err(ParseError::NoSpace)
+            }
+        } else {
+            Err(ParseError::NoNewline)
+        }
     }
 }

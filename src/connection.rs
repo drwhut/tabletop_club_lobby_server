@@ -47,8 +47,8 @@ pub async fn listen() -> std::io::Result<()> {
                 shutdown_signal: shutdown_receiver,
             };
 
-            let mut player = Player::spawn(context);
-            player.handle().await.expect("player handle errored");
+            let player = Player::spawn(context);
+            tokio::spawn(wait_for_player(player)).await;
         }
         Err(e) => {
             println!("error: {:?}", e);
@@ -56,4 +56,8 @@ pub async fn listen() -> std::io::Result<()> {
     };
 
     Ok(())
+}
+
+async fn wait_for_player(mut player: Player) {
+    player.handle().await.expect("stuff");
 }
