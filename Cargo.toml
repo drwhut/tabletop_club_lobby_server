@@ -19,7 +19,8 @@ fastrand = "2.0.1"
 futures-util = { version = "0.3", default-features = false }
 serde = { version = "1.0.197", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.21.0"
+tokio-util = { version = "0.7.10", features = ["rt"] }
+tokio-tungstenite = { version = "0.21.0", features = ["native-tls"] }
 toml_edit = { version = "0.22.7", features = ["serde"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }

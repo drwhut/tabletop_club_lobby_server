@@ -24,6 +24,7 @@ SOFTWARE.
 use clap::Parser;
 use std::path::PathBuf;
 use tokio::fs;
+use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 #[cfg(windows)]
@@ -33,17 +34,21 @@ use tracing::{info, warn};
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::{fmt, prelude::*};
 
-/// Lobby server for Tabletop Club.
-/// 
-/// Stuff here!
+/// Lobby server for the open-source multiplayer game Tabletop Club.
 #[derive(Parser)]
 #[command(version, author)]
 struct CommandLineArguments {
-    /// The config path.
-    /// 
-    /// More stuff!
+    /// Path to the server configuration file.
+    ///
+    /// This file is periodically checked for changes.
+    ///
+    /// If the file does not exist, it is automatically created.
     #[arg(short, long, default_value = "server.toml")]
-    config_path: PathBuf
+    config_path: PathBuf,
+
+    /// The port number to bind the server to.
+    #[arg(short, long, default_value_t = 9080)]
+    port: u16,
 }
 
 #[tokio::main]
@@ -70,6 +75,11 @@ async fn main() -> Result<(), std::io::Error> {
     // Parse the command-line arguments.
     let args = CommandLineArguments::parse();
 
+    // Create the TcpListener, and bind it to this machine's address with the
+    // given port.
+    let address = format!("127.0.0.1:{}", args.port);
+    let tcp_listener = TcpListener::bind(&address).await?;
+
     // Among the arguments is the path to the configuration file - we need to
     // check if there is even a file there, and if there isn't, we need to
     // create it.
@@ -78,7 +88,10 @@ async fn main() -> Result<(), std::io::Error> {
     if config_file_exists {
         info!(path = config_path_str, "using config file");
     } else {
-        warn!(path = config_path_str, "config file does not exist, attempting to create it");
+        warn!(
+            path = config_path_str,
+            "config file does not exist, attempting to create it"
+        );
 
         let default_config = tabletop_club_lobby_server::config::VariableConfig::default();
         default_config.write_config_file(&args.config_path).await?;
@@ -93,6 +106,7 @@ async fn main() -> Result<(), std::io::Error> {
     // function properly.
     let server_context = tabletop_club_lobby_server::ServerContext {
         config_file_path: args.config_path,
+        tcp_listener: tcp_listener,
         shutdown_signal: shutdown_receiver,
     };
 

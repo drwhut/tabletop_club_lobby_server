@@ -27,15 +27,21 @@ pub mod message;
 pub mod player;
 pub mod room;
 
+use std::default;
 use std::path::PathBuf;
+use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tokio_util::task::TaskTracker;
+use tracing::{error, info, trace, warn};
 
 /// The properties that the [`Server`] requires.
 pub struct ServerContext {
     /// The file path to the configuration file.
     pub config_file_path: PathBuf,
+
+    /// The [`TcpListener`] to listen to connections from.
+    pub tcp_listener: TcpListener,
 
     /// The shutdown signal from the main thread.
     pub shutdown_signal: broadcast::Receiver<()>,
@@ -69,7 +75,7 @@ impl Server {
 
         // Create a watch channel so that the various tasks can keep track of
         // changes to the configuration.
-        let (config_sender, config_receiver) = watch::channel(default_config);
+        let (config_sender, mut config_receiver) = watch::channel(default_config);
 
         // Spawn the task that checks the configuration file every so often, and
         // updates the server configuration if it changes.
@@ -79,13 +85,80 @@ impl Server {
             context.shutdown_signal.resubscribe(),
         ));
 
-        // Wait for the shutdown signal from the main thread.
-        // NOTE: If the sender is dropped, that means the main thread is dead,
-        // so this task will be aborted anyways.
-        let _ = context.shutdown_signal.recv().await;
+        // Keep track of what the configuration says the maximum message and
+        // payload sizes should be.
+        let mut max_message_size = default_config.max_message_size;
+        let mut max_payload_size = default_config.max_payload_size;
+
+        // Since we spawn tasks for each connection that we accept, we need to
+        // track them in the event that we receive the shutdown signal, and need
+        // to wait for them to all finish before we can exit.
+        // NOTE: We're using tokio_util::task::TaskTracker instead of
+        // tokio::task::JoinSet since this frees memory once a task is complete.
+        let conn_task_tracker = TaskTracker::new();
+
+        match context.tcp_listener.local_addr() {
+            Ok(addr) => {
+                info!(addr = %addr, "listening for connections");
+            }
+            Err(e) => {
+                warn!(error = %e, "could not get listener address");
+            }
+        }
+
+        // Wait for connections until we receive the shutdown signal.
+        loop {
+            tokio::select! {
+                res = context.tcp_listener.accept() => {
+                    match res {
+                        Ok((tcp_stream, remote_addr)) => {
+                            // Attempt to accept the connection in a separate
+                            // task, and keep track of the task in case we need
+                            // to shut down in the middle of it.
+                            let conn_context = connection::ConnectionContext {
+                                tcp_stream: tcp_stream,
+                                remote_addr: remote_addr,
+                                max_message_size: max_message_size,
+                                max_payload_size: max_payload_size,
+                                shutdown_signal: context.shutdown_signal.resubscribe(),
+                            };
+
+                            conn_task_tracker.spawn(connection::accept_connection(conn_context));
+                        },
+                        Err(e) => {
+                            error!(error = %e, "failed to accept connection");
+                        }
+                    }
+                },
+
+                // Watch for changes to the configuration - if the sender has
+                // been dropped then we'll keep the config we have.
+                Ok(()) = config_receiver.changed() => {
+                    let new_config = config_receiver.borrow_and_update();
+
+                    max_message_size = new_config.max_message_size;
+                    max_payload_size = new_config.max_payload_size;
+                    info!(max_message_size, max_payload_size, "stream config updated");
+                },
+
+                // If the sender gets dropped, then we want to exit anyway.
+                _ = context.shutdown_signal.recv() => {
+                    break;
+                }
+            }
+        }
 
         // Now that we are shutting down, wait for all of the tasks that we have
         // spawned to end gracefully.
+        if !conn_task_tracker.is_empty() {
+            info!(
+                num_tasks = conn_task_tracker.len(),
+                "waiting for accept tasks to finish"
+            );
+        }
+        conn_task_tracker.close();
+        conn_task_tracker.wait().await;
+
         if let Err(e) = update_config_handle.await {
             error!(error = %e, "update config task did not finish to completion");
         }
