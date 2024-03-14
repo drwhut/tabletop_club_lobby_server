@@ -21,18 +21,37 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+use clap::Parser;
+use std::path::PathBuf;
+use tokio::fs;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 #[cfg(windows)]
 use tokio::signal::windows;
-use tracing::info;
+use tokio::sync::broadcast;
+use tracing::{info, warn};
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::{fmt, prelude::*};
+
+/// Lobby server for Tabletop Club.
+/// 
+/// Stuff here!
+#[derive(Parser)]
+#[command(version, author)]
+struct CommandLineArguments {
+    /// The config path.
+    /// 
+    /// More stuff!
+    #[arg(short, long, default_value = "server.toml")]
+    config_path: PathBuf
+}
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
     // Print spans and events to STDOUT in a nice format.
-    let fmt_layer = fmt::layer();
+    // NOTE: We don't want to include the full 'tabletop_club_lobby_server'
+    // target name in each log.
+    let fmt_layer = fmt::layer().with_target(false);
 
     // Filter what spans and events get output based on the `RUST_LOG`
     // environment variable. By default, INFO, WARN, and ERROR are output.
@@ -48,7 +67,37 @@ async fn main() -> Result<(), std::io::Error> {
         .with(fmt_layer)
         .init();
 
-    // TODO: Start the server.
+    // Parse the command-line arguments.
+    let args = CommandLineArguments::parse();
+
+    // Among the arguments is the path to the configuration file - we need to
+    // check if there is even a file there, and if there isn't, we need to
+    // create it.
+    let config_file_exists = fs::try_exists(&args.config_path).await?;
+    let config_path_str = args.config_path.to_string_lossy().into_owned();
+    if config_file_exists {
+        info!(path = config_path_str, "using config file");
+    } else {
+        warn!(path = config_path_str, "config file does not exist, attempting to create it");
+
+        let default_config = tabletop_club_lobby_server::config::VariableConfig::default();
+        default_config.write_config_file(&args.config_path).await?;
+        info!(path = config_path_str, "config file created");
+    }
+
+    // Create a broadcast channel so that we can inform all of the spawned tasks
+    // that we want them to shut down.
+    let (shutdown_sender, shutdown_receiver) = broadcast::channel(1);
+
+    // Create the context for the server, which contains everything it needs to
+    // function properly.
+    let server_context = tabletop_club_lobby_server::ServerContext {
+        config_file_path: args.config_path,
+        shutdown_signal: shutdown_receiver,
+    };
+
+    // Start the server by spawning it's task!
+    let mut server = tabletop_club_lobby_server::Server::spawn(server_context);
 
     // Now that we've started the server, we should wait for any signals from
     // the OS to terminate the process, so that we can shutdown gracefully.
@@ -84,8 +133,16 @@ async fn main() -> Result<(), std::io::Error> {
     // A shutdown signal was received, now we need to let all of the spawned
     // tasks know and let them finish gracefully.
     info!("shutdown signal received");
+    shutdown_sender
+        .send(())
+        .expect("shutdown broadcast could not be sent");
 
-    // TODO: Send shutdown broadcast, await handles.
+    // Wait for the server task to finish, which itself should wait for all of
+    // its spawned tasks to finish.
+    server
+        .handle()
+        .await
+        .expect("server task did not finish to completion");
 
     Ok(())
 }

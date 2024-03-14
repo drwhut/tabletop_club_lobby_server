@@ -1,2 +1,5 @@
 # Rust
 /target
+
+# Server configuration file
+server.toml

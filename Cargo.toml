@@ -11,14 +11,16 @@ keywords = ["lobby", "server", "webrtc", "websocket"]
 categories = ["command-line-utilities", "web-programming::websocket"]
 
 edition = "2021"
-rust-version = "1.63"
+rust-version = "1.70"
 
 [dependencies]
+clap = { version = "4.5.2", features = ["derive"] }
 fastrand = "2.0.1"
 futures-util = { version = "0.3", default-features = false }
-rust-ini = "0.21.0"
-tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+serde = { version = "1.0.197", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.21.0"
+toml_edit = { version = "0.22.7", features = ["serde"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 
