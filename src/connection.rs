@@ -21,9 +21,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+use crate::player::PlayerStream;
+
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio_native_tls::native_tls::{Identity, TlsAcceptor};
 use tokio_native_tls::TlsAcceptor as TlsAcceptorAsync;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -49,6 +51,9 @@ pub struct ConnectionContext {
 
     /// The maximum size of incoming message payloads, in bytes.
     pub max_payload_size: usize,
+
+    /// Send established connections and their remote addresses to the lobby.
+    pub send_to_lobby: mpsc::Sender<(PlayerStream, SocketAddr)>,
 
     /// The shutdown signal receiver from the main thread.
     pub shutdown_signal: broadcast::Receiver<()>,
@@ -163,6 +168,15 @@ pub async fn accept_connection(mut context: ConnectionContext) {
 
         if let Some(ws_stream) = maybe_ws_stream {
             info!("connection established");
+
+            // Send the stream and its remote address to the lobby.
+            let res = context
+                .send_to_lobby
+                .send((ws_stream, context.remote_addr))
+                .await;
+            if let Err(e) = res {
+                warn!(error = %e, "lobby receiver dropped, assuming server is shutting down");
+            }
         } else {
             trace!("skipped accepting websocket connection");
         }

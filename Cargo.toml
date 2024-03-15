@@ -17,6 +17,7 @@ rust-version = "1.70"
 clap = { version = "4.5.2", features = ["derive"] }
 fastrand = "2.0.1"
 futures-util = { version = "0.3", default-features = false }
+nohash-hasher = "0.2.0"
 serde = { version = "1.0.197", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tokio-native-tls = "0.3.1"

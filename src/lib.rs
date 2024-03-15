@@ -23,17 +23,22 @@ SOFTWARE.
 
 pub mod config;
 pub mod connection;
+pub mod lobby;
 pub mod message;
 pub mod player;
 pub mod room;
 
 use std::path::PathBuf;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_native_tls::native_tls::Identity;
 use tokio_util::task::TaskTracker;
 use tracing::{error, info, trace, warn};
+
+/// The number of connections and their remote addresses that can be in the
+/// buffer on the way to the lobby task until senders need to wait for space.
+const LOBBY_CONNECTION_CHANNEL_BUFFER_SIZE: usize = 20;
 
 /// The properties that the [`Server`] requires.
 pub struct ServerContext {
@@ -88,6 +93,20 @@ impl Server {
             context.shutdown_signal.resubscribe(),
         ));
 
+        // Create a channel for sending WebSocket connections and their remote
+        // addresses to the lobby task.
+        let (conn_sender, conn_receiver) = mpsc::channel(LOBBY_CONNECTION_CHANNEL_BUFFER_SIZE);
+
+        // Create the lobby task, and send it the data it needs to function.
+        let lobby_context = lobby::LobbyContext {
+            connection_receiver: conn_receiver,
+            config_receiver: config_receiver.clone(),
+            shutdown_signal: context.shutdown_signal.resubscribe(),
+        };
+
+        // Spawn the lobby task.
+        let mut lobby = lobby::Lobby::spawn(lobby_context);
+
         // Keep track of what the configuration says the maximum message and
         // payload sizes should be.
         let mut max_message_size = default_config.max_message_size;
@@ -124,6 +143,7 @@ impl Server {
                                 remote_addr: remote_addr,
                                 max_message_size: max_message_size,
                                 max_payload_size: max_payload_size,
+                                send_to_lobby: conn_sender.clone(),
                                 shutdown_signal: context.shutdown_signal.resubscribe(),
                             };
 
@@ -162,6 +182,10 @@ impl Server {
         }
         conn_task_tracker.close();
         conn_task_tracker.wait().await;
+
+        if let Err(e) = lobby.handle().await {
+            error!(error = %e, "lobby task did not finish to completion");
+        }
 
         if let Err(e) = update_config_handle.await {
             error!(error = %e, "update config task did not finish to completion");
