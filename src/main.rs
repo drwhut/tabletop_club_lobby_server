@@ -30,7 +30,8 @@ use tokio::signal::unix::{signal, SignalKind};
 #[cfg(windows)]
 use tokio::signal::windows;
 use tokio::sync::broadcast;
-use tracing::{info, warn};
+use tokio_native_tls::native_tls::Identity;
+use tracing::{error, info, warn};
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::{fmt, prelude::*};
 
@@ -43,12 +44,31 @@ struct CommandLineArguments {
     /// This file is periodically checked for changes.
     ///
     /// If the file does not exist, it is automatically created.
-    #[arg(short, long, default_value = "server.toml")]
+    #[arg(short, long = "config", default_value = "server.toml")]
     config_path: PathBuf,
 
     /// The port number to bind the server to.
     #[arg(short, long, default_value_t = 9080)]
     port: u16,
+
+    /// Enables TLS encryption.
+    ///
+    /// If set, a certificate and private key must be provided.
+    #[arg(
+        short,
+        long = "tls",
+        requires = "certificate_path",
+        requires = "private_key_path"
+    )]
+    tls_enabled: bool,
+
+    /// Path to the PEM-encoded X509 certificate file.
+    #[arg(short = 'x', long = "x509-certificate", requires = "tls_enabled")]
+    certificate_path: Option<PathBuf>,
+
+    /// Path to the PEM-encoded private key file.
+    #[arg(short = 'k', long = "private-key", requires = "tls_enabled")]
+    private_key_path: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -80,6 +100,26 @@ async fn main() -> Result<(), std::io::Error> {
     let address = format!("127.0.0.1:{}", args.port);
     let tcp_listener = TcpListener::bind(&address).await?;
 
+    // Check if we need to create a cryptographic identity for the server.
+    let maybe_identity = if args.tls_enabled {
+        // We can safely unwrap here, as these arguments must be present due to
+        // the way we set up the command line argument parser.
+        let cert_bytes = fs::read(args.certificate_path.unwrap()).await?;
+        let key_bytes = fs::read(args.private_key_path.unwrap()).await?;
+
+        info!("tls enabled, creating identity");
+        match Identity::from_pkcs8(&cert_bytes, &key_bytes) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                error!(error = %e, "failed to create identity, tls disabled");
+                None
+            }
+        }
+    } else {
+        warn!("tls disabled, only modified clients can connect");
+        None
+    };
+
     // Among the arguments is the path to the configuration file - we need to
     // check if there is even a file there, and if there isn't, we need to
     // create it.
@@ -107,6 +147,7 @@ async fn main() -> Result<(), std::io::Error> {
     let server_context = tabletop_club_lobby_server::ServerContext {
         config_file_path: args.config_path,
         tcp_listener: tcp_listener,
+        tls_identity: maybe_identity,
         shutdown_signal: shutdown_receiver,
     };
 

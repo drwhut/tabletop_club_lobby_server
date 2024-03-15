@@ -24,6 +24,8 @@ SOFTWARE.
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
+use tokio_native_tls::native_tls::{Identity, TlsAcceptor};
+use tokio_native_tls::TlsAcceptor as TlsAcceptorAsync;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{accept_async_with_config, MaybeTlsStream};
 use tracing::{debug, error, info, trace, warn};
@@ -32,6 +34,10 @@ use tracing::{debug, error, info, trace, warn};
 pub struct ConnectionContext {
     /// The raw TCP stream for the connection.
     pub tcp_stream: TcpStream,
+
+    /// The server's cryptographic identity. If not given, the connection will
+    /// not be encrypted.
+    pub tls_identity: Option<Identity>,
 
     /// The client's address.
     ///
@@ -73,7 +79,36 @@ pub async fn accept_connection(mut context: ConnectionContext) {
 
     // Since we could be asked to shutdown at any point in this process, use
     // the 'None' in Option to signal that we shouldn't continue.
-    let maybe_stream = Some(MaybeTlsStream::Plain(context.tcp_stream));
+    let maybe_stream = if let Some(identity) = context.tls_identity {
+        // TODO: Don't need to create this for every connection.
+        match TlsAcceptor::new(identity) {
+            Ok(tls_acceptor) => {
+                let tls_acceptor_async = TlsAcceptorAsync::from(tls_acceptor);
+                tokio::select! {
+                    res = tls_acceptor_async.accept(context.tcp_stream) => {
+                        match res {
+                            Ok(tls_stream) => {
+                                debug!("using encrypted tls stream");
+                                Some(MaybeTlsStream::NativeTls(tls_stream))
+                            },
+                            Err(e) => {
+                                error!(error = %e, "failed to accept tls connection");
+                                None
+                            }
+                        }
+                    },
+                    _ = context.shutdown_signal.recv() => None
+                }
+            }
+            Err(e) => {
+                error!(error = %e, "failed to create tls acceptor");
+                None
+            }
+        }
+    } else {
+        debug!("using unencrypted tcp stream");
+        Some(MaybeTlsStream::Plain(context.tcp_stream))
+    };
 
     if let Some(stream) = maybe_stream {
         // The 'max_send_queue' property is deprecated, but we need to assign it
@@ -129,10 +164,10 @@ pub async fn accept_connection(mut context: ConnectionContext) {
         if let Some(ws_stream) = maybe_ws_stream {
             info!("connection established");
         } else {
-            trace!("skip accepting websocket connection");
+            trace!("skipped accepting websocket connection");
         }
     } else {
-        trace!("skip creating websocket connection");
+        trace!("skipped creating websocket connection");
     }
 
     trace!("finished accepting connection");

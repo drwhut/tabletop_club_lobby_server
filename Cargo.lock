@@ -935,6 +935,7 @@ dependencies = [
  "futures-util",
  "serde",
  "tokio",
+ "tokio-native-tls",
  "tokio-tungstenite",
  "tokio-util",
  "toml_edit",
