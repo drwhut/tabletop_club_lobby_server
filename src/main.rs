@@ -97,7 +97,7 @@ async fn main() -> Result<(), std::io::Error> {
 
     // Create the TcpListener, and bind it to this machine's address with the
     // given port.
-    let address = format!("127.0.0.1:{}", args.port);
+    let address = format!("0.0.0.0:{}", args.port);
     let tcp_listener = TcpListener::bind(&address).await?;
 
     // Check if we need to create a cryptographic identity for the server.
