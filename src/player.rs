@@ -21,123 +21,243 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+use crate::config::VariableConfig;
 use crate::message::{LobbyCommand, LobbyRequest};
 
 use futures_util::sink::{Close, SinkExt};
 use futures_util::stream::StreamExt;
 use std::borrow::Cow;
+use std::fmt;
+use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-use tracing::{error, info};
+use tracing::{debug, error, info, trace, warn};
 
+/// The type used for handle IDs.
 pub type HandleID = u32;
+
+/// The type used for player IDs.
 pub type PlayerID = u32;
 
+/// A type alias for a player's WebSocket stream.
 pub type PlayerStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+/// The types of errors that can occur when parsing player messages.
+#[derive(Debug)]
 pub enum ParseError {
     NoNewline,
     NoSpace,
     UnexpectedPayload,
-    NotInLobby,
+    NotInRoom,
     InvalidCommand,
     InvalidArgument,
 }
 
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoNewline => write!(f, "no new line character in message"),
+            Self::NoSpace => write!(f, "no space character between command and argument"),
+            Self::UnexpectedPayload => write!(f, "received a payload when we did not expect one"),
+            Self::NotInRoom => write!(f, "cannot execute command when not in a room"),
+            Self::InvalidCommand => write!(f, "invalid command"),
+            Self::InvalidArgument => write!(f, "invalid argument"),
+        }
+    }
+}
+
+/// The data required to spawn a player instance.
 #[derive(Debug)]
-pub struct Context {
+pub struct PlayerContext {
+    /// The handle ID associated with this player.
+    ///
+    /// **NOTE:** This is NOT the same as their player ID, which is only
+    /// assigned once they join a room.
     pub handle_id: HandleID,
+
+    /// The WebSocket stream for this player.
     pub client_stream: PlayerStream,
 
-    pub lobby_sender: mpsc::Sender<LobbyRequest>,
-    pub timeout_watch: watch::Receiver<Duration>,
+    /// The channel for sending requests to the lobby.
+    //pub lobby_sender: mpsc::Sender<LobbyRequest>,
+
+    /// The channel for receiving configuration updates.
+    pub config_receiver: watch::Receiver<VariableConfig>,
+
+    /// The channel for receiving the main thread's shutdown signal.
     pub shutdown_signal: broadcast::Receiver<()>,
 }
 
+/// An instance which handles incoming player messages.
 #[derive(Debug)]
 pub struct Player {
     handle: JoinHandle<()>,
+    remote_addr: SocketAddr,
 }
 
 impl Player {
-    pub fn spawn(context: Context) -> Self {
+    /// Spawn a new player task with the given `context`.
+    ///
+    /// Although the task does not use it, the player's remote address is also
+    /// required for tracking purposes.
+    pub fn spawn(context: PlayerContext, remote_addr: SocketAddr) -> Self {
         Self {
             handle: tokio::spawn(Self::task(context)),
+            remote_addr: remote_addr,
         }
     }
 
+    /// Get the [`JoinHandle`] for this player's instance.
     pub fn handle(&mut self) -> &mut JoinHandle<()> {
         &mut self.handle
     }
 
-    #[tracing::instrument(level = "trace", skip(context))]
-    async fn task(mut context: Context) {
-        let timeout_duration = *context.timeout_watch.borrow_and_update();
+    /// Get this player's remote address.
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
+    }
 
-        let should_exit: Option<bool> = tokio::select! {
+    /// Handle the player's incoming messages.
+    #[tracing::instrument(name = "player", skip_all, fields(handle_id = context.handle_id))]
+    async fn task(mut context: PlayerContext) {
+        // Get the server configuration as it is right now, and note what the
+        // join time limit is.
+        let current_config = *context.config_receiver.borrow_and_update();
+        let join_time_limit_secs = current_config.join_room_time_limit_secs;
+        let join_time_limit = Duration::from_secs(join_time_limit_secs);
+        debug!(join_time_limit = %join_time_limit_secs, "read config");
+
+        info!("waiting for request");
+        match Self::wait_for_join_request(&mut context, join_time_limit).await {
+            Ok(lobby_request) => {
+                println!("lobby_request = {:?}", lobby_request);
+            }
+            Err(maybe_close_code) => {
+                println!("maybe_close_code = {:?}", maybe_close_code);
+            }
+        }
+    }
+
+    /// Wait for the player's request to create or join a room in the lobby.
+    ///
+    /// If the player sends a valid request in time, it is returned.
+    ///
+    /// If the player sends an invalid request, or they do not send a request in
+    /// time, then a close code might be returned. If one is returned, then we
+    /// need to send it to the player and wait for their echo - otherwise, we
+    /// can just drop the connection.
+    #[tracing::instrument(name = "join", skip_all)]
+    async fn wait_for_join_request(
+        context: &mut PlayerContext,
+        timeout_duration: Duration,
+    ) -> Result<LobbyRequest, Option<CloseCode>> {
+        tokio::select! {
+            // TODO: The amount of indenting here is painful - find a nice way
+            // to tidy it up!
             res = timeout(timeout_duration, context.client_stream.next()) => {
-                if let Ok(stream_res) = res {
-                    println!("{:?}", stream_res);
-
-                    if let Some(message) = stream_res {
-                        match message {
-                            Ok(message) => {
-                                match message {
+                if let Ok(maybe_frame) = res {
+                    if let Some(maybe_frame) = maybe_frame {
+                        match maybe_frame {
+                            Ok(msg) => {
+                                match msg {
                                     Message::Text(text) => {
-                                        None
+                                        match Self::parse_lobby_message(&text) {
+                                            Ok(request) => {
+                                                info!(%request, "received");
+                                                Ok(LobbyRequest {
+                                                    handle_id: context.handle_id,
+                                                    command: request,
+                                                })
+                                            },
+                                            Err(e) => {
+                                                warn!(error = %e, "received invalid message");
+                                                match e {
+                                                    // TODO: Make close codes
+                                                    // more specific?
+                                                    ParseError::NoNewline => Err(Some(PlayerCloseCode::InvalidFormat.into())),
+                                                    ParseError::NoSpace => Err(Some(PlayerCloseCode::InvalidFormat.into())),
+                                                    ParseError::UnexpectedPayload => Err(Some(PlayerCloseCode::InvalidFormat.into())),
+                                                    ParseError::NotInRoom => Err(Some(PlayerCloseCode::NotInRoom.into())),
+                                                    ParseError::InvalidCommand => Err(Some(PlayerCloseCode::InvalidCommand.into())),
+                                                    ParseError::InvalidArgument => Err(Some(PlayerCloseCode::InvalidFormat.into())),
+                                                }
+                                            }
+                                        }
                                     },
-                                    _ => None,
+
+                                    Message::Binary(_) => {
+                                        warn!("received binary message");
+                                        Err(Some(CloseCode::Unsupported))
+                                    },
+
+                                    // We are not sending any pings during this
+                                    // time, and as such, we do not expect any
+                                    // pongs.
+                                    Message::Ping(_) => {
+                                        warn!("received ping");
+                                        Err(Some(CloseCode::Protocol))
+                                    },
+                                    Message::Pong(_) => {
+                                        warn!("received pong before client joined room");
+                                        Err(Some(CloseCode::Protocol))
+                                    },
+
+                                    Message::Close(maybe_close_frame) => {
+                                        if let Some(close_frame) = maybe_close_frame {
+                                            info!(%close_frame, "received close message");
+                                        } else {
+                                            info!("received close message");
+                                        }
+
+                                        // TODO: Wait for ConnectionClosed message.
+                                        Err(None)
+                                    },
+
+                                    // Should never get this while reading.
+                                    Message::Frame(_) => {
+                                        error!("received raw frame from stream");
+                                        Err(None)
+                                    },
                                 }
                             },
                             Err(e) => {
-                                // Protocol error.
-                                None
-                            },
+                                warn!(error = %e, "websocket error in request");
+                                match e {
+                                    WebSocketError::ConnectionClosed => Err(None),
+                                    WebSocketError::AlreadyClosed => Err(None),
+                                    WebSocketError::Io(_) => Err(None),
+                                    WebSocketError::Tls(_) => Err(Some(CloseCode::Protocol)),
+                                    WebSocketError::Capacity(_) => Err(Some(CloseCode::Size)),
+                                    WebSocketError::Protocol(_) => Err(Some(CloseCode::Protocol)),
+                                    WebSocketError::WriteBufferFull(_) => Err(None),
+                                    WebSocketError::Utf8 => Err(Some(CloseCode::Invalid)),
+                                    WebSocketError::AttackAttempt => Err(None),
+                                    WebSocketError::Url(_) => Err(None),
+                                    WebSocketError::Http(_) => Err(Some(CloseCode::Protocol)),
+                                    WebSocketError::HttpFormat(_) => Err(Some(CloseCode::Invalid)),
+                                }
+                            }
                         }
                     } else {
-                        // No more items can be gotten from the stream.
-                        println!("Stream closed!");
-                        Some(false)
+                        warn!("stream ended early");
+                        Err(None)
                     }
                 } else {
-                    let close_msg = Message::Close(Some(CloseFrame{
-                        code: CloseCode::Library(4002),
-                        reason: Cow::Borrowed("did not join in time"),
-                    }));
-
-                    let res = context.client_stream.send(close_msg).await;
-                    Some(res.is_ok())
+                    warn!("join request timeout");
+                    Err(Some(PlayerCloseCode::DidNotJoinRoom.into()))
                 }
-            },
-            res = context.shutdown_signal.recv() => {
-                if let Err(e) = res {
-                    // TODO: Error.
-                }
-
-                let close_msg = Message::Close(Some(CloseFrame{
-                    code: CloseCode::Away,
-                    reason: Cow::Borrowed(""),
-                }));
-
-                let res = context.client_stream.send(close_msg).await;
-                Some(res.is_ok())
             }
-        };
-
-        println!("{:?}", should_exit);
-
-        println!(
-            "echo? {:?}",
-            timeout(timeout_duration, context.client_stream.next()).await
-        );
+        }
     }
 
+    /// Parse the player's message for creating or joining a room.
     fn parse_lobby_message(msg: &str) -> Result<LobbyCommand, ParseError> {
         if let Some((first_line, rest)) = msg.split_once('\n') {
             if !rest.is_empty() {
@@ -159,10 +279,10 @@ impl Player {
                             Err(ParseError::InvalidArgument)
                         }
                     }
-                    "S:" => Err(ParseError::NotInLobby),
-                    "O:" => Err(ParseError::NotInLobby),
-                    "A:" => Err(ParseError::NotInLobby),
-                    "C:" => Err(ParseError::NotInLobby),
+                    "S:" => Err(ParseError::NotInRoom),
+                    "O:" => Err(ParseError::NotInRoom),
+                    "A:" => Err(ParseError::NotInRoom),
+                    "C:" => Err(ParseError::NotInRoom),
                     _ => Err(ParseError::InvalidCommand),
                 }
             } else {

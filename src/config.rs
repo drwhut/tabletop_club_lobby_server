@@ -153,7 +153,9 @@ impl VariableConfig {
             &mut document,
             "join_room_time_limit_secs",
             "
-# How long the server will give players to create or join a room, in seconds.\n",
+# How long the server will give players to create or join a room, in seconds.
+# NOTE: The time limit should be relatively short, as no ping messages are sent
+# by the server while it is waiting for the player's request.\n",
         );
 
         Self::set_key_prefix(

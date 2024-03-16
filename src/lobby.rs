@@ -22,7 +22,7 @@ SOFTWARE.
 */
 
 use crate::config::VariableConfig;
-use crate::player::{HandleID, Player, PlayerCloseCode, PlayerStream};
+use crate::player::*;
 
 use futures_util::{SinkExt, StreamExt};
 use nohash_hasher::IntMap;
@@ -148,6 +148,16 @@ impl Lobby {
                             // Make a note that this handle ID has come from
                             // this address.
                             handle_list.push(handle_id);
+
+                            // Spawn the player instance, and add them to the
+                            // join queue.
+                            let player_context = PlayerContext {
+                                handle_id,
+                                client_stream,
+                                config_receiver: context.config_receiver.clone(),
+                                shutdown_signal: context.shutdown_signal.resubscribe(),
+                            };
+                            join_queue.insert(handle_id, Player::spawn(player_context, client_addr));
                         }
                     } else {
                         // All senders have been dropped - we will never get

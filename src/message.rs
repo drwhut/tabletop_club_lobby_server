@@ -23,11 +23,24 @@ SOFTWARE.
 
 use crate::room::RoomCode;
 
+use std::fmt;
+
+#[derive(Debug)]
 pub enum LobbyCommand {
     CreateRoom,
     JoinRoom(RoomCode),
 }
 
+impl fmt::Display for LobbyCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CreateRoom => write!(f, "create room"),
+            Self::JoinRoom(code) => write!(f, "join room {}", code),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct LobbyRequest {
     pub handle_id: u32,
     pub command: LobbyCommand,
