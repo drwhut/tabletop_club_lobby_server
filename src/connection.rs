@@ -85,7 +85,8 @@ pub async fn accept_connection(mut context: ConnectionContext) {
     // Since we could be asked to shutdown at any point in this process, use
     // the 'None' in Option to signal that we shouldn't continue.
     let maybe_stream = if let Some(identity) = context.tls_identity {
-        // TODO: Don't need to create this for every connection.
+        // TODO: Don't need to create this for every connection. What if we made
+        // the TlsAcceptorAsync in main.rs?
         match TlsAcceptor::new(identity) {
             Ok(tls_acceptor) => {
                 let tls_acceptor_async = TlsAcceptorAsync::from(tls_acceptor);

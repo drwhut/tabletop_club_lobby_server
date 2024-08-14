@@ -87,6 +87,7 @@ async fn main() -> Result<(), std::io::Error> {
     // Using all of the layers we've made, build a tracing subscriber that takes
     // all of the spans and events that come in and parses them through the
     // various layers.
+    // TODO: Add layer for Prometheus, and a tracing subscriber as well.
     tracing_subscriber::registry()
         .with(filter_layer)
         .with(fmt_layer)

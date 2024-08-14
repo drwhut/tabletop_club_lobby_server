@@ -40,7 +40,7 @@ use tokio::fs;
 use tokio::sync::{broadcast, watch};
 use tokio::time::{interval, Duration};
 use toml_edit::DocumentMut;
-use tracing::{error, info, trace, trace_span, warn};
+use tracing::{error, info, trace, warn};
 
 /// How often the task will check the configuration file.
 const CONFIG_UPDATE_INTERVAL: Duration = Duration::from_secs(30);
@@ -212,6 +212,9 @@ pub async fn update_config_task(
     mut shutdown_signal: broadcast::Receiver<()>,
 ) {
     info!("task started");
+
+    // TODO: Find a more efficient way to check if the file has been updated -
+    // maybe something like inotify, but async-safe?
     let mut interval = interval(CONFIG_UPDATE_INTERVAL);
 
     loop {

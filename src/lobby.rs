@@ -38,6 +38,8 @@ use tokio_tungstenite::tungstenite::{client, Message};
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
+// TODO: Re-consider this module when the player module has been re-written.
+
 /// The amount of time to wait for echo messages when closing connections.
 const WAIT_FOR_CLOSE_ECHO_DURATION: Duration = Duration::from_secs(5);
 

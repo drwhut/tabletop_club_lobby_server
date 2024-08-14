@@ -21,19 +21,21 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+use crate::close_code::CloseCode;
 use crate::config::VariableConfig;
 use crate::message::{LobbyCommand, LobbyRequest};
 
+use futures_util::future;
 use futures_util::sink::{Close, SinkExt};
 use futures_util::stream::StreamExt;
 use std::borrow::Cow;
 use std::fmt;
+use std::fs::read;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{timeout, Duration};
-use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio::time::{sleep, timeout, Duration};
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::Message;
@@ -48,6 +50,151 @@ pub type PlayerID = u32;
 
 /// A type alias for a player's WebSocket stream.
 pub type PlayerStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// The maximum amount of time to wait for the client to send back an echoed
+/// close frame after we have sent one.
+const WAIT_FOR_CLOSE_ECHO_DURATION: Duration = Duration::from_secs(5);
+
+/// The data required to spawn a [`PlayerClose`] instance.
+#[derive(Debug)]
+pub struct PlayerCloseContext {
+    /// The WebSocket stream for this player.
+    pub client_stream: PlayerStream,
+
+    /// The [`CloseCode`] to send to, and expect back from, the client.
+    pub close_code: CloseCode,
+
+    /// An optional [`HandleID`] for logging purposes.
+    pub maybe_handle_id: Option<HandleID>,
+
+    /// An optional [`PlayerID`] for logging purposes.
+    pub maybe_player_id: Option<PlayerID>,
+}
+
+/// An instance which sends a close code to a given player, and then waits for
+/// the client to echo it back, up to a given amount of time.
+/// 
+/// This instance should be used whenever the server wants to initialise the
+/// process of closing the connection with a client. If however the client is
+/// the one to initialise it, then the instance handling the client connection
+/// should simply echo it back, send messages where necessary, and then drop the
+/// connection out of scope.
+/// 
+/// Since this instance can potentially take up to a few seconds to complete,
+/// it should be added to a task tracker so that connections are closed
+/// gracefully when the server is shutting down.
+pub struct PlayerClose {
+    handle: JoinHandle<()>,
+}
+
+impl PlayerClose {
+    /// Spawn a new instance of [`PlayerClose`] with the given `context`.
+    pub fn spawn(context: PlayerCloseContext) -> Self {
+        Self {
+            handle: tokio::spawn(Self::task(context)),
+        }
+    }
+
+    /// Get the [`JoinHandle`] for this instance.
+    pub fn handle(&mut self) -> &mut JoinHandle<()> {
+        &mut self.handle
+    }
+
+    /// Handle sending the given close code, and waiting for the echo from the
+    /// client.
+    #[tracing::instrument(name="player_close", skip_all)]
+    async fn task(mut context: PlayerCloseContext) {
+        let close_frame = Message::Close(Some(CloseFrame {
+            code: context.close_code,
+            reason: "".into(),
+        }));
+
+        // Display different information in the log depending on what was
+        // provided.
+        if let Some(handle_id) = context.maybe_handle_id {
+            info!(%handle_id, close_code = %context.close_code, "sending");
+        } else if let Some(player_id) = context.maybe_player_id {
+            info!(%player_id, close_code = %context.close_code, "sending");
+        } else {
+            info!(close_code = %context.close_code, "sending");
+        }
+
+        match context.client_stream.send(close_frame).await {
+            Ok(()) => {
+                // Keep going through the stream until we find the echo frame,
+                // or until time runs out.
+                // TODO: Make sure this works as intended.
+                let read_until_echo = Self::read_until_close_frame(
+                        &mut context.client_stream, context.close_code);
+
+                match timeout(WAIT_FOR_CLOSE_ECHO_DURATION, read_until_echo).await {
+                    Ok(close_code_res) => match close_code_res {
+                        Ok(close_code_received) => {
+                            if close_code_received == context.close_code {
+                                trace!("echo was expected value");
+                            } else {
+                                debug!(%close_code_received, "echo was not expected value");
+                            }
+                        },
+                        Err(_) => {} // Call should output error log.
+                    },
+                    Err(_) => {
+                        trace!("did not receive echo in time");
+                    }
+                }
+            },
+            Err(e) => {
+                warn!(error = %e, "failed to send close code");
+            },
+        }
+
+        if let Some(handle_id) = context.maybe_handle_id {
+            info!(%handle_id, "connection closed");
+        } else if let Some(player_id) = context.maybe_player_id {
+            info!(%player_id, "connection closed");
+        } else {
+            info!("connection closed");
+        }
+    }
+
+    /// Keep reading messages from the given client until one is a close frame,
+    /// or until the stream is closed. Returns the close code given, or an error
+    /// if the message is invalid, or the stream ended unexpectedly.
+    /// TODO: Check if this function still counts under the player_close trace?
+    async fn read_until_close_frame(stream: &mut PlayerStream, close_code_exp: CloseCode) -> Result<CloseCode, ()> {
+        loop {
+            match stream.next().await {
+                Some(res) => match res {
+                    Ok(msg) => match msg {
+                        Message::Close(maybe_close_frame) => {
+                            if let Some(close_frame) = maybe_close_frame {
+                                return Ok(close_frame.code);
+                            } else {
+                                trace!("echo did not contain close frame");
+                                return Err(());
+                            }
+                        },
+
+                        // If the message is not a close frame, then we need
+                        // to keep reading until we get one.
+                        _ => {}
+                    },
+                    Err(e) => {
+                        // TODO: Should this be a trace/debug instead?
+                        warn!(error = %e, "error receiving echo event");
+                        return Err(());
+                    },
+                }
+                None => {
+                    trace!("client closed connection early");
+                    return Err(());
+                }
+            }
+        }
+    }
+}
+
+/*
 
 /// The types of errors that can occur when parsing player messages.
 #[derive(Debug)]
@@ -101,6 +248,12 @@ pub struct Player {
     handle: JoinHandle<()>,
     remote_addr: SocketAddr,
 }
+
+// TODO: Split into two, one for players waiting to join a room, and one for
+// players currently in a room? Think about the timelines for these handles,
+// e.g. which bit should handle close codes? Ideally, everything related to the
+// player should be in one place - but we may need to track certain handles
+// in outside classes, like when we are waiting for a close code.
 
 impl Player {
     /// Spawn a new player task with the given `context`.
@@ -294,150 +447,4 @@ impl Player {
     }
 }
 
-/// A custom set of close codes that the server can send to the players.
-pub enum PlayerCloseCode {
-    /// A generic error occured.
-    ///
-    /// **NOTE:** This close code should never be used. Always try to use a more
-    /// descriptive close code.
-    Error,
-
-    /// Failed to connect to the lobby server.
-    ///
-    /// **NOTE:** This close code should never be used. This is meant as an
-    /// error code for clients, as is here only for reference.
-    Unreachable,
-
-    /// The client did not create or join a room in time.
-    DidNotJoinRoom,
-
-    /// The host disconnected from the room the player was in.
-    HostDisconnected,
-
-    /// Only the host of the room is allowed to seal it.
-    OnlyHostCanSeal,
-
-    /// The maximum number of rooms has been reached.
-    TooManyRooms,
-
-    /// Tried to do something that can only be done when not in a room.
-    AlreadyInRoom,
-
-    /// The room that was given by the client does not exist.
-    RoomDoesNotExist,
-
-    /// The room that was given by the client has been sealed.
-    RoomSealed,
-
-    /// The message that was given was incorrectly formatted.
-    InvalidFormat,
-
-    /// Tried to do something that can only be done while in a room.
-    NotInRoom,
-
-    /// An internal server error occured.
-    ///
-    /// **NOTE:** This close code is redundant, [`CloseCode::Error`] should be
-    /// used instead.
-    ServerError,
-
-    /// The message that was given contained an invalid destination ID.
-    InvalidDestination,
-
-    /// The message that was given contained an invalid command.
-    InvalidCommand,
-
-    /// The maximum number of players has been reached.
-    ///
-    /// **NOTE:** This close code is now redundant.
-    TooManyPlayers,
-
-    /// A binary message was received when only text messages are allowed.
-    ///
-    /// **NOTE:** This close code is redundant, [`CloseCode::Unsupported`]
-    /// should be used instead.
-    InvalidMode,
-
-    /// Too many connections from the same IP address.
-    TooManyConnections,
-
-    /// Established another connection too quickly after the last one.
-    ReconnectTooQuickly,
-
-    /// The queue of players trying to create or join rooms is at capacity.
-    JoinQueueFull,
-}
-
-impl From<PlayerCloseCode> for u16 {
-    fn from(value: PlayerCloseCode) -> Self {
-        match value {
-            PlayerCloseCode::Error => 4000,
-            PlayerCloseCode::Unreachable => 4001,
-            PlayerCloseCode::DidNotJoinRoom => 4002,
-            PlayerCloseCode::HostDisconnected => 4003,
-            PlayerCloseCode::OnlyHostCanSeal => 4004,
-            PlayerCloseCode::TooManyRooms => 4005,
-            PlayerCloseCode::AlreadyInRoom => 4006,
-            PlayerCloseCode::RoomDoesNotExist => 4007,
-            PlayerCloseCode::RoomSealed => 4008,
-            PlayerCloseCode::InvalidFormat => 4009,
-            PlayerCloseCode::NotInRoom => 4010,
-            PlayerCloseCode::ServerError => 4011,
-            PlayerCloseCode::InvalidDestination => 4012,
-            PlayerCloseCode::InvalidCommand => 4013,
-            PlayerCloseCode::TooManyPlayers => 4014,
-            PlayerCloseCode::InvalidMode => 4015,
-            PlayerCloseCode::TooManyConnections => 4016,
-            PlayerCloseCode::ReconnectTooQuickly => 4017,
-            PlayerCloseCode::JoinQueueFull => 4018,
-        }
-    }
-}
-
-impl TryFrom<u16> for PlayerCloseCode {
-    type Error = ();
-
-    fn try_from(value: u16) -> Result<Self, <Self as TryFrom<u16>>::Error> {
-        match value {
-            4000 => Ok(Self::Error),
-            4001 => Ok(Self::Unreachable),
-            4002 => Ok(Self::DidNotJoinRoom),
-            4003 => Ok(Self::HostDisconnected),
-            4004 => Ok(Self::OnlyHostCanSeal),
-            4005 => Ok(Self::TooManyRooms),
-            4006 => Ok(Self::AlreadyInRoom),
-            4007 => Ok(Self::RoomDoesNotExist),
-            4008 => Ok(Self::RoomSealed),
-            4009 => Ok(Self::InvalidFormat),
-            4010 => Ok(Self::NotInRoom),
-            4011 => Ok(Self::ServerError),
-            4012 => Ok(Self::InvalidDestination),
-            4013 => Ok(Self::InvalidCommand),
-            4014 => Ok(Self::TooManyPlayers),
-            4015 => Ok(Self::InvalidMode),
-            4016 => Ok(Self::TooManyConnections),
-            4017 => Ok(Self::ReconnectTooQuickly),
-            4018 => Ok(Self::JoinQueueFull),
-
-            _ => Err(()),
-        }
-    }
-}
-
-impl From<PlayerCloseCode> for CloseCode {
-    fn from(value: PlayerCloseCode) -> Self {
-        Self::Library(value.into())
-    }
-}
-
-impl TryFrom<CloseCode> for PlayerCloseCode {
-    type Error = ();
-
-    fn try_from(value: CloseCode) -> Result<Self, <Self as TryFrom<CloseCode>>::Error> {
-        if let CloseCode::Library(code_u16) = value {
-            PlayerCloseCode::try_from(code_u16)
-        } else {
-            Err(())
-        }
-    }
-}
+*/

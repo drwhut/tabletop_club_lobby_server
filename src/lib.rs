@@ -21,6 +21,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+pub mod close_code;
 pub mod config;
 pub mod connection;
 pub mod lobby;
@@ -34,7 +35,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_native_tls::native_tls::Identity;
 use tokio_util::task::TaskTracker;
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, warn};
 
 /// The number of connections and their remote addresses that can be in the
 /// buffer on the way to the lobby task until senders need to wait for space.

@@ -49,6 +49,8 @@ impl RoomCode {
 
         true
     }
+
+    // TODO: Add a function to check if the room code has profanity.
 }
 
 impl Default for RoomCode {
