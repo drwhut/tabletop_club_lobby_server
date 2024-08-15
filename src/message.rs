@@ -21,6 +21,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+use crate::close_code::CloseCode;
 use crate::room::RoomCode;
 
 use std::fmt;
@@ -29,6 +30,8 @@ use std::fmt;
 pub enum LobbyCommand {
     CreateRoom,
     JoinRoom(RoomCode),
+    CloseConnection(CloseCode),
+    DropConnection,
 }
 
 impl fmt::Display for LobbyCommand {
@@ -36,6 +39,8 @@ impl fmt::Display for LobbyCommand {
         match self {
             Self::CreateRoom => write!(f, "create room"),
             Self::JoinRoom(code) => write!(f, "join room {}", code),
+            Self::CloseConnection(code) => write!(f, "close connection (code: {})", code),
+            Self::DropConnection => write!(f, "drop connection"),
         }
     }
 }

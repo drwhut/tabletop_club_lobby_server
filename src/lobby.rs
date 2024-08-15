@@ -21,11 +21,14 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+use crate::close_code::CustomCloseCode;
 use crate::config::VariableConfig;
+use crate::message::LobbyCommand;
 use crate::player::*;
 
+use futures_util::future::join;
 use futures_util::{SinkExt, StreamExt};
-use nohash_hasher::IntMap;
+use nohash_hasher::{IntMap, IsEnabled};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -38,10 +41,9 @@ use tokio_tungstenite::tungstenite::{client, Message};
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
-// TODO: Re-consider this module when the player module has been re-written.
-
-/// The amount of time to wait for echo messages when closing connections.
-const WAIT_FOR_CLOSE_ECHO_DURATION: Duration = Duration::from_secs(5);
+/// The number of [`LobbyRequest`] that can be stored in the [`Lobby`] buffer
+/// before [`PlayerJoining`] instances need to wait to send them.
+const LOBBY_REQUEST_CHANNEL_BUFFER_SIZE: usize = 50;
 
 /// The data needed to start the lobby task.
 pub struct LobbyContext {
@@ -81,25 +83,39 @@ impl Lobby {
     async fn task(mut context: LobbyContext) {
         trace!("creating structures");
 
+        // Create a channel for player instances to send us LobbyRequests.
+        let (req_sender, mut req_receiver) = mpsc::channel(LOBBY_REQUEST_CHANNEL_BUFFER_SIZE);
+
         // The list of players that are currently waiting to create or join a
         // lobby.
-        let mut join_queue = IntMap::<HandleID, Player>::default();
+        let mut join_queue = IntMap::<HandleID, PlayerJoining>::default();
 
-        // For each remote address, keep track of the player handles they have
-        // spawned. We will use this to limit the number of player instances
-        // that individual remote origins can create.
-        let mut origin_handle_map = HashMap::<SocketAddr, Vec<HandleID>>::default();
+        // For each remote address, keep track of either the [`HandleID`] or
+        // the [`PlayerID`] for all of their clients, depending on if they are
+        // in the join queue or if they are in a room respectively.
+        // This will help to limit the number of client instances from each
+        // remote IP address.
+        // TODO: Find a way to make this an IntMap.
+        let mut origin_handle_map = HashMap::<SocketAddr, Vec<ClientUniqueID>>::default();
+
+        // TODO: Add a hash map for tracking when IPs disconnect, and prevent
+        // clients from reconnecting too quickly.
 
         // Read the server configuration as it currently stands - it may be
         // updated later.
         let starting_config = *context.config_receiver.borrow_and_update();
         let mut max_players_per_address = starting_config.max_players_per_address;
         let mut player_queue_capacity = starting_config.player_queue_capacity;
+        let join_room_time_limit_secs = starting_config.join_room_time_limit_secs;
 
         debug!(
             max_players_per_address,
-            player_queue_capacity, "read config"
+            player_queue_capacity,
+            join_room_time_limit_secs, "read config"
         );
+
+        // Create dedicated [`Duration`] structures for time limits.
+        let mut join_room_time_limit = Duration::from_secs(join_room_time_limit_secs);
 
         // Every so often we may need to terminate a client's connection early.
         // We do this in separate tasks so they don't clog up the main lobby
@@ -124,19 +140,26 @@ impl Lobby {
 
                         if addr_conn_count >= max_players_per_address {
                             warn!("too many connections from this address");
-                            maybe_close_code = Some(PlayerCloseCode::TooManyConnections.into());
+                            maybe_close_code = Some(CustomCloseCode::TooManyConnections.into());
                         }
 
                         // Check that the join queue isn't full.
                         if join_queue.len() >= player_queue_capacity {
                             warn!("player queue is full");
-                            maybe_close_code = Some(PlayerCloseCode::JoinQueueFull.into());
+                            maybe_close_code = Some(CustomCloseCode::JoinQueueFull.into());
                         }
 
                         if let Some(close_code) = maybe_close_code {
                             // Spawn a separate task for closing the stream.
                             trace!("spawning task to close connection");
-                            close_task_tracker.spawn(Self::send_close(client_stream, close_code));
+
+                            let close_context = SendCloseContext {
+                                client_stream,
+                                close_code,
+                                client_id: ClientUniqueID::None,
+                            };
+
+                            close_task_tracker.spawn(send_close(close_context));
                         } else {
                             // Generate a random HandleID that isn't already in
                             // use.
@@ -149,22 +172,64 @@ impl Lobby {
 
                             // Make a note that this handle ID has come from
                             // this address.
-                            handle_list.push(handle_id);
+                            handle_list.push(ClientUniqueID::IsJoining(handle_id));
 
                             // Spawn the player instance, and add them to the
                             // join queue.
-                            let player_context = PlayerContext {
+                            let player_context = PlayerJoiningContext {
                                 handle_id,
                                 client_stream,
-                                config_receiver: context.config_receiver.clone(),
-                                shutdown_signal: context.shutdown_signal.resubscribe(),
+                                lobby_request_sender: req_sender.clone(),
+                                max_wait_time: join_room_time_limit,
+                                // TODO: Also give shutdown signal.
                             };
-                            join_queue.insert(handle_id, Player::spawn(player_context, client_addr));
+
+                            join_queue.insert(handle_id, PlayerJoining::spawn(player_context));
                         }
                     } else {
                         // All senders have been dropped - we will never get
                         // another incoming client.
                         error!("all connection senders have been dropped");
+                        break;
+                    }
+                },
+
+                res = req_receiver.recv() => {
+                    if let Some((request, stream)) = res {
+                        info!(handle_id = request.handle_id, command = %request.command);
+
+                        match request.command {
+                            LobbyCommand::CreateRoom => {
+                                // TODO: Create a new room, with the player as
+                                // the host.
+                            },
+                            LobbyCommand::JoinRoom(room_code) => {
+                                // TODO: Check if the given room exists, and
+                                // have the player join it.
+                            },
+                            LobbyCommand::CloseConnection(close_code) => {
+                                // Spawn a send_close task to properly close the
+                                // connection.
+                                let close_context = SendCloseContext {
+                                    client_stream: stream,
+                                    close_code,
+                                    client_id: ClientUniqueID::IsJoining(request.handle_id),
+                                };
+
+                                close_task_tracker.spawn(send_close(close_context));
+
+                                // TODO: Give a sender so that we know when the
+                                // connection is actually closed, then do the
+                                // same as we would if we dropped the connection.
+                            },
+                            LobbyCommand::DropConnection => {
+                                // TODO: Modify data structures accordingly.
+                            },
+                        };
+                    } else {
+                        // All senders have been dropped - we will never get
+                        // another request again.
+                        error!("all request senders have been dropped");
                         break;
                     }
                 },
@@ -175,7 +240,15 @@ impl Lobby {
 
                     max_players_per_address = new_config.max_players_per_address;
                     player_queue_capacity = new_config.player_queue_capacity;
-                    info!(max_players_per_address, player_queue_capacity, "lobby config updated");
+                    let join_room_time_limit_secs = new_config.join_room_time_limit_secs;
+                    info!(
+                        max_players_per_address,
+                        player_queue_capacity,
+                        join_room_time_limit_secs, "lobby config updated"
+                    );
+
+                    // Update the [`Durations`] for timings.
+                    join_room_time_limit = Duration::from_secs(join_room_time_limit_secs);
 
                     // TODO: Kick players out if values have been lowered.
                 },
@@ -199,54 +272,5 @@ impl Lobby {
         close_task_tracker.wait().await;
 
         info!("stopped");
-    }
-
-    /// Send a close message to the client, and wait a certain amount of time
-    /// for the client's echo message.
-    /// TODO: Move to player struct?
-    #[tracing::instrument(name = "lobby_send_close", skip_all)]
-    async fn send_close(mut stream: PlayerStream, close_code: CloseCode) {
-        let msg = Message::Close(Some(CloseFrame {
-            code: close_code,
-            reason: "".into(),
-        }));
-
-        debug!(%close_code, "sending");
-        let expect_echo = match stream.send(msg).await {
-            Ok(()) => true,
-            Err(e) => {
-                warn!(error = %e, "failed to send close code, dropping connection");
-                false
-            }
-        };
-
-        if expect_echo {
-            match timeout(WAIT_FOR_CLOSE_ECHO_DURATION, stream.next()).await {
-                Ok(maybe_msg) => {
-                    if let Some(msg) = maybe_msg {
-                        match msg {
-                            Ok(msg) => match msg {
-                                Message::Close(_) => {
-                                    trace!("received close echo");
-                                }
-                                _ => {
-                                    trace!("did not receive a close echo");
-                                }
-                            },
-                            Err(e) => {
-                                trace!(error = %e, "error receiving echo event");
-                            }
-                        }
-                    } else {
-                        trace!("client closed connection early");
-                    }
-                }
-                Err(_) => {
-                    trace!("did not receive echo in time");
-                }
-            }
-        }
-
-        info!("connection closed");
     }
 }
