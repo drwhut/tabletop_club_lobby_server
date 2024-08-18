@@ -26,6 +26,7 @@ use crate::config::VariableConfig;
 use crate::message::LobbyCommand;
 use crate::player::*;
 
+use core::net::IpAddr;
 use futures_util::future::join;
 use futures_util::{SinkExt, StreamExt};
 use nohash_hasher::{IntMap, IsEnabled};
@@ -95,8 +96,7 @@ impl Lobby {
         // in the join queue or if they are in a room respectively.
         // This will help to limit the number of client instances from each
         // remote IP address.
-        // TODO: Find a way to make this an IntMap.
-        let mut origin_handle_map = HashMap::<SocketAddr, Vec<ClientUniqueID>>::default();
+        let mut origin_handle_map = HashMap::<IpAddr, Vec<ClientUniqueID>>::default();
 
         // TODO: Add a hash map for tracking when IPs disconnect, and prevent
         // clients from reconnecting too quickly.
@@ -134,7 +134,8 @@ impl Lobby {
                         let mut maybe_close_code: Option<CloseCode> = None;
 
                         // Check this address hasn't created too many players.
-                        let handle_list = origin_handle_map.entry(client_addr).or_insert(Vec::new());
+                        let handle_list = origin_handle_map.entry(client_addr.ip())
+                                .or_insert(Vec::new());
                         let addr_conn_count = handle_list.len();
                         debug!(n = addr_conn_count, "checking existing connections from this address");
 
