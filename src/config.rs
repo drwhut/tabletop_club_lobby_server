@@ -489,11 +489,10 @@ reconnect_wait_limit_secs = 5";
         assert!(!test_file_exists);
 
         // If the file doesn't exist, then no updates should come through the
-        // watch channel.
+        // watch channel immediately.
         let handle = tokio::spawn(update_config_task("__no_file__.toml",
                 watch_send, shutdown_receive));
         
-        tokio::time::advance(CONFIG_UPDATE_INTERVAL).await;
         assert_eq!(*watch_receive.borrow(), VariableConfig::default());
         assert!(!watch_receive.has_changed().unwrap());
 
@@ -501,7 +500,7 @@ reconnect_wait_limit_secs = 5";
         handle.await.expect("task was aborted");
     }
 
-    #[tokio::test(start_paused = false)]
+    #[tokio::test(start_paused = true)]
     async fn update_task_default_file() {
         let (watch_send, mut watch_receive) = watch::channel(VariableConfig::default());
         let (shutdown_send, shutdown_receive) = broadcast::channel::<()>(1);
@@ -510,26 +509,9 @@ reconnect_wait_limit_secs = 5";
         VariableConfig::default().write_config_file("__default__.toml").await.expect("failed to write config file");
 
         // If a config file exists, but it has the default settings, then no
-        // updates should come through the watch channel.
-        //let handle = tokio::spawn(update_config_task("__default__.toml",
-                //watch_send, shutdown_receive));
-        
-        // TODO: I'm trying to get it so this separate runtime is paused, and
-        // then it's time is advanced specifically when I want it to be. But it
-        // doesn't look like time::advance works when entering the new runtime?
-        // Or is it because the scheduler isn't picking it to run?
-        let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .start_paused(true)
-                .build()
-                .unwrap();
-
-        let handle = runtime.spawn(update_config_task("__default__.toml", watch_send, shutdown_receive));
-        
-        {
-            let _guard = runtime.enter();
-            tokio::time::advance(CONFIG_UPDATE_INTERVAL * 2).await;
-        }
+        // updates should come through the watch channel immediately.
+        let handle = tokio::spawn(update_config_task("__default__.toml",
+                watch_send, shutdown_receive));
 
         assert_eq!(*watch_receive.borrow(), VariableConfig::default());
         assert!(!watch_receive.has_changed().unwrap());
@@ -547,22 +529,80 @@ reconnect_wait_limit_secs = 5";
             response_time_limit_secs: 20,
             reconnect_wait_limit_secs: 5
         };
+        assert!(test_config.validate().is_ok());
         
         test_config.write_config_file("__default__.toml").await.expect("failed to write config file");
 
         // Now the config file has updated, the task's next pass should detect
         // the change and send an update to the watch channel.
-        {
-            let _guard = runtime.enter();
-            tokio::time::advance(CONFIG_UPDATE_INTERVAL * 2).await;
-        }
+        tokio::time::advance(CONFIG_UPDATE_INTERVAL).await;
+
+        watch_receive.changed().await.unwrap();
         assert_eq!(*watch_receive.borrow(), test_config);
-        assert!(watch_receive.has_changed().unwrap());
-        watch_receive.mark_changed();
 
         shutdown_send.send(()).expect("failed to send shutdown signal");
         handle.await.expect("task was aborted");
 
         fs::remove_file("__default__.toml").await.expect("failed to remove test file");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn update_task_modified_file() {
+        let (watch_send, mut watch_receive) = watch::channel(VariableConfig::default());
+        let (shutdown_send, shutdown_receive) = broadcast::channel::<()>(1);
+
+        // Make a modified config, and save it to a test file.
+        let test_config = VariableConfig {
+            max_message_size: 200,
+            max_payload_size: 100,
+            max_players_per_address: 100,
+            max_players_per_room: 50,
+            max_rooms: 100,
+            player_queue_capacity: 500,
+            join_room_time_limit_secs: 30,
+            ping_interval_secs: 40,
+            response_time_limit_secs: 60,
+            reconnect_wait_limit_secs: 10
+        };
+        assert!(test_config.validate().is_ok());
+
+        test_config.write_config_file("__modified__.toml").await.expect("failed to write config file");
+
+        // If a config file exists, and it differs from the default, then the
+        // task should immediately send an update through the watch channel.
+        let handle = tokio::spawn(update_config_task("__modified__.toml",
+                watch_send, shutdown_receive));
+
+        watch_receive.changed().await.unwrap();
+        assert_eq!(*watch_receive.borrow(), test_config);
+
+        // Make a new config, and save it over the old file.
+        let test_config = VariableConfig {
+            max_message_size: 3000,
+            max_payload_size: 2500,
+            max_players_per_address: 20,
+            max_players_per_room: 10,
+            max_rooms: 1000,
+            player_queue_capacity: 100,
+            join_room_time_limit_secs: 10,
+            ping_interval_secs: 15,
+            response_time_limit_secs: 20,
+            reconnect_wait_limit_secs: 5
+        };
+        assert!(test_config.validate().is_ok());
+        
+        test_config.write_config_file("__modified__.toml").await.expect("failed to write config file");
+
+        // Now the config file has updated, the task's next pass should detect
+        // the change and send another update to the watch channel.
+        tokio::time::advance(CONFIG_UPDATE_INTERVAL).await;
+
+        watch_receive.changed().await.unwrap();
+        assert_eq!(*watch_receive.borrow(), test_config);
+
+        shutdown_send.send(()).expect("failed to send shutdown signal");
+        handle.await.expect("task was aborted");
+
+        fs::remove_file("__modified__.toml").await.expect("failed to remove test file");
     }
 }
