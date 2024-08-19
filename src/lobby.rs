@@ -157,7 +157,7 @@ impl Lobby {
                             let close_context = SendCloseContext {
                                 client_stream,
                                 close_code,
-                                client_id: ClientUniqueID::None,
+                                client_id: None,
                             };
 
                             close_task_tracker.spawn(send_close(close_context));
@@ -211,10 +211,11 @@ impl Lobby {
                             LobbyCommand::CloseConnection(close_code) => {
                                 // Spawn a send_close task to properly close the
                                 // connection.
+                                let uid = ClientUniqueID::IsJoining(request.handle_id);
                                 let close_context = SendCloseContext {
                                     client_stream: stream,
                                     close_code,
-                                    client_id: ClientUniqueID::IsJoining(request.handle_id),
+                                    client_id: Some(uid),
                                 };
 
                                 close_task_tracker.spawn(send_close(close_context));

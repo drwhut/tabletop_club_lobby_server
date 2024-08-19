@@ -54,14 +54,8 @@ pub type PlayerStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const WAIT_FOR_CLOSE_ECHO_DURATION: Duration = Duration::from_secs(5);
 
 /// Data which uniquely identifies a client within the server.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum ClientUniqueID {
-    /// The player will not have an ID only if they have yet to be in the join
-    /// queue.
-    /// TODO: Should clients always be given a [`HandleID`], even if they don't
-    /// end up joining the queue?
-    None,
-
     /// The [`HandleID`] of the player if they are waiting to join a room.
     IsJoining(HandleID),
 
@@ -72,7 +66,6 @@ pub enum ClientUniqueID {
 impl fmt::Display for ClientUniqueID {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::None => write!(f, "none"),
             // TODO: See how this format looks in the logs.
             Self::IsJoining(handle_id) => write!(f, "handle_id={}", handle_id),
             Self::HasJoined{ room_code, player_id } => write!(f, "room_code={} player_id={}", room_code, player_id),
@@ -89,8 +82,8 @@ pub struct SendCloseContext {
     /// The [`CloseCode`] to send to, and expect back from, the client.
     pub close_code: CloseCode,
 
-    /// The client's ID for logging purposes.
-    pub client_id: ClientUniqueID,
+    /// The client's ID for logging purposes, if the client has one.
+    pub client_id: Option<ClientUniqueID>,
 }
 
 /// A task which sends a close code to a given player, and then waits for the
@@ -105,20 +98,27 @@ pub struct SendCloseContext {
 /// Since this task can potentially take up to a few seconds to complete, it
 /// should be added to a task tracker so that connections are closed gracefully
 /// when the server is shutting down.
-#[tracing::instrument(name="send_close", skip_all, fields(client_id = %context.client_id))]
+#[tracing::instrument(name="send_close", skip_all, fields(client_id))]
 pub async fn send_close(mut context: SendCloseContext) {
+    // Since the `client_id` is within an `Option`, we need to set the log's
+    // span field separately.
+    let client_id = match context.client_id {
+        Some(unique_id) => unique_id.to_string(),
+        None => "none".to_string()
+    };
+    tracing::Span::current().record("client_id", &client_id);
+
     let close_frame = Message::Close(Some(CloseFrame {
         code: context.close_code,
         reason: "".into(),
     }));
-    
+
     info!(close_code = %context.close_code, "sending");
 
     match context.client_stream.send(close_frame).await {
         Ok(()) => {
             // Keep going through the stream until we find the echo frame,
             // or until time runs out.
-            // TODO: Make sure this works as intended.
             let read_until_echo = read_until_close_frame(&mut context.client_stream);
 
             match timeout(WAIT_FOR_CLOSE_ECHO_DURATION, read_until_echo).await {
@@ -442,5 +442,27 @@ fn websocket_error_to_close_code(e: WebSocketError) -> Option<CloseCode> {
         WebSocketError::Url(_) => None, // Can't send any message.
         WebSocketError::Http(_) => Some(CloseCode::Protocol),
         WebSocketError::HttpFormat(_) => Some(CloseCode::Invalid),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    crate::server_types!();
+
+    async fn send_close_server(mut stream: WSStream, index: usize) -> Result<(), ()> {
+        println!("{:?}", stream.next().await.unwrap());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_close() {
+        let handle = crate::server_setup!(10000, 1, send_close_server);
+
+        let mut stream = crate::client_setup!(10000);
+        stream.send(Message::Text(String::from("yo"))).await.unwrap();
+
+        handle.await.expect("server was aborted");
     }
 }

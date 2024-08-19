@@ -30,6 +30,9 @@ pub mod player;
 pub mod room;
 pub mod room_code;
 
+#[cfg(test)]
+pub mod test_util;
+
 use std::path::PathBuf;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, watch};
