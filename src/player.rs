@@ -22,21 +22,16 @@ SOFTWARE.
 */
 
 use crate::close_code::{CloseCode, CustomCloseCode};
-use crate::config::VariableConfig;
 use crate::message::{LobbyCommand, LobbyRequest};
-use crate::room::RoomCode; // TODO: Put this in it's own file, as room.rs relies on player.rs?
+use crate::room_code::RoomCode;
 
-use futures_util::future;
-use futures_util::sink::{Close, SinkExt};
+use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
-use std::borrow::Cow;
 use std::fmt;
-use std::fs::read;
-use std::net::SocketAddr;
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{timeout, Duration};
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::Message;

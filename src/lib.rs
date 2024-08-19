@@ -28,6 +28,7 @@ pub mod lobby;
 pub mod message;
 pub mod player;
 pub mod room;
+pub mod room_code;
 
 use std::path::PathBuf;
 use tokio::net::TcpListener;

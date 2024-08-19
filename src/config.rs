@@ -481,7 +481,7 @@ reconnect_wait_limit_secs = 5";
 
     #[tokio::test(start_paused = true)]
     async fn update_task_no_file() {
-        let (watch_send, mut watch_receive) = watch::channel(VariableConfig::default());
+        let (watch_send, watch_receive) = watch::channel(VariableConfig::default());
         let (shutdown_send, shutdown_receive) = broadcast::channel::<()>(1);
 
         // Verify that the file doesn't exist.

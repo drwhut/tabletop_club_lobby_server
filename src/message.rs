@@ -22,7 +22,7 @@ SOFTWARE.
 */
 
 use crate::close_code::CloseCode;
-use crate::room::RoomCode;
+use crate::room_code::RoomCode;
 
 use std::fmt;
 
