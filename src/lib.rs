@@ -37,7 +37,7 @@ use std::path::PathBuf;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio_native_tls::native_tls::Identity;
+use tokio_native_tls::TlsAcceptor as TlsAcceptorAsync;
 use tokio_util::task::TaskTracker;
 use tracing::{error, info, warn};
 
@@ -53,8 +53,8 @@ pub struct ServerContext {
     /// The [`TcpListener`] to listen to connections from.
     pub tcp_listener: TcpListener,
 
-    /// The cryptographic identity of the server.
-    pub tls_identity: Option<Identity>,
+    /// The TLS acceptor for the server.
+    pub tls_acceptor: Option<TlsAcceptorAsync>,
 
     /// The shutdown signal from the main thread.
     pub shutdown_signal: broadcast::Receiver<()>,
@@ -144,7 +144,7 @@ impl Server {
                             // to shut down in the middle of it.
                             let conn_context = connection::ConnectionContext {
                                 tcp_stream: tcp_stream,
-                                tls_identity: context.tls_identity.clone(),
+                                tls_acceptor: context.tls_acceptor.clone(),
                                 remote_addr: remote_addr,
                                 max_message_size: max_message_size,
                                 max_payload_size: max_payload_size,

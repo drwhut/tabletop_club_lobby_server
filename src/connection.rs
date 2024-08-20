@@ -26,7 +26,6 @@ use crate::player::PlayerStream;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
-use tokio_native_tls::native_tls::{Identity, TlsAcceptor};
 use tokio_native_tls::TlsAcceptor as TlsAcceptorAsync;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{accept_async_with_config, MaybeTlsStream};
@@ -37,9 +36,9 @@ pub struct ConnectionContext {
     /// The raw TCP stream for the connection.
     pub tcp_stream: TcpStream,
 
-    /// The server's cryptographic identity. If not given, the connection will
+    /// An acceptor for encrypted TLS streams. If not given, the connection will
     /// not be encrypted.
-    pub tls_identity: Option<Identity>,
+    pub tls_acceptor: Option<TlsAcceptorAsync>,
 
     /// The client's address.
     ///
@@ -64,52 +63,30 @@ pub struct ConnectionContext {
 pub async fn accept_connection(mut context: ConnectionContext) {
     trace!("accepting connection");
 
-    // Check the maximum message and payload sizes we were given, they might be
-    // too low to be able to do anything useful.
+    // The buffer size is dependent on the maximum message size, so we need to
+    // make sure the maximum size isn't too small.
     if context.max_message_size < 100 {
         context.max_message_size = 100;
-        warn!(
-            "max message size too low, set to {}",
-            context.max_message_size
-        );
-    }
-
-    if context.max_payload_size < 100 {
-        context.max_payload_size = 100;
-        warn!(
-            "max payload size too low, set to {}",
-            context.max_payload_size
-        );
+        warn!("max message size too low, set to {}", context.max_message_size);
     }
 
     // Since we could be asked to shutdown at any point in this process, use
     // the 'None' in Option to signal that we shouldn't continue.
-    let maybe_stream = if let Some(identity) = context.tls_identity {
-        // TODO: Don't need to create this for every connection. What if we made
-        // the TlsAcceptorAsync in main.rs?
-        match TlsAcceptor::new(identity) {
-            Ok(tls_acceptor) => {
-                let tls_acceptor_async = TlsAcceptorAsync::from(tls_acceptor);
-                tokio::select! {
-                    res = tls_acceptor_async.accept(context.tcp_stream) => {
-                        match res {
-                            Ok(tls_stream) => {
-                                debug!("using encrypted tls stream");
-                                Some(MaybeTlsStream::NativeTls(tls_stream))
-                            },
-                            Err(e) => {
-                                error!(error = %e, "failed to accept tls connection");
-                                None
-                            }
-                        }
+    let maybe_stream = if let Some(acceptor) = context.tls_acceptor {
+        tokio::select! {
+            res = acceptor.accept(context.tcp_stream) => {
+                match res {
+                    Ok(tls_stream) => {
+                        debug!("using encrypted tls stream");
+                        Some(MaybeTlsStream::NativeTls(tls_stream))
                     },
-                    _ = context.shutdown_signal.recv() => None
+                    Err(e) => {
+                        error!(error = %e, "failed to accept tls connection");
+                        None
+                    }
                 }
-            }
-            Err(e) => {
-                error!(error = %e, "failed to create tls acceptor");
-                None
-            }
+            },
+            _ = context.shutdown_signal.recv() => None
         }
     } else {
         debug!("using unencrypted tcp stream");

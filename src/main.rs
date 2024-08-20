@@ -30,7 +30,8 @@ use tokio::signal::unix::{signal, SignalKind};
 #[cfg(windows)]
 use tokio::signal::windows;
 use tokio::sync::broadcast;
-use tokio_native_tls::native_tls::Identity;
+use tokio_native_tls::native_tls::{Identity, TlsAcceptor};
+use tokio_native_tls::TlsAcceptor as TlsAcceptorAsync;
 use tracing::{error, info, warn};
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::{fmt, prelude::*};
@@ -102,7 +103,7 @@ async fn main() -> Result<(), std::io::Error> {
     let tcp_listener = TcpListener::bind(&address).await?;
 
     // Check if we need to create a cryptographic identity for the server.
-    let maybe_identity = if args.tls_enabled {
+    let maybe_acceptor = if args.tls_enabled {
         // We can safely unwrap here, as these arguments must be present due to
         // the way we set up the command line argument parser.
         let cert_bytes = fs::read(args.certificate_path.unwrap()).await?;
@@ -110,7 +111,15 @@ async fn main() -> Result<(), std::io::Error> {
 
         info!("tls enabled, creating identity");
         match Identity::from_pkcs8(&cert_bytes, &key_bytes) {
-            Ok(id) => Some(id),
+            Ok(identity) => {
+                match TlsAcceptor::new(identity) {
+                    Ok(acceptor) => Some(TlsAcceptorAsync::from(acceptor)),
+                    Err(e) => {
+                        error!(error = %e, "failed to create acceptor, tls disabled");
+                        None
+                    }
+                }
+            },
             Err(e) => {
                 error!(error = %e, "failed to create identity, tls disabled");
                 None
@@ -148,7 +157,7 @@ async fn main() -> Result<(), std::io::Error> {
     let server_context = tabletop_club_lobby_server::ServerContext {
         config_file_path: args.config_path,
         tcp_listener: tcp_listener,
-        tls_identity: maybe_identity,
+        tls_acceptor: maybe_acceptor,
         shutdown_signal: shutdown_receiver,
     };
 
