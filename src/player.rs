@@ -449,9 +449,7 @@ fn websocket_error_to_close_code(e: WebSocketError) -> Option<CloseCode> {
 mod tests {
     use super::*;
 
-    crate::server_types!();
-
-    async fn send_close_server(mut stream: WSStream, index: usize) -> Result<(), ()> {
+    async fn send_close_server(mut stream: PlayerStream, index: usize) -> Result<(), ()> {
         println!("{:?}", stream.next().await.unwrap());
         Ok(())
     }

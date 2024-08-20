@@ -23,16 +23,6 @@ SOFTWARE.
 
 //! Helper macros used for unit tests throughout the server.
 
-/// Creates the following types for use by the other macros:
-/// 
-/// - `WSStream`: WebSocket stream.
-#[macro_export]
-macro_rules! server_types {
-    () => {
-        type WSStream = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
-    }
-}
-
 /// Set up the server task with the following parameters:
 /// 
 /// - The port number to bind to. **NOTE:** Make sure to use a different port
@@ -53,9 +43,10 @@ macro_rules! server_setup {
             ready_send.send(()).expect("failed to send ready signal");
 
             for client_index in 0..$n {
-                let (connection, _) = listener.accept().await
+                let (conn, _) = listener.accept().await
                         .expect("failed to accept connection");
-                let stream = tokio_tungstenite::accept_async(connection)
+                let maybe_tls = tokio_tungstenite::MaybeTlsStream::Plain(conn);
+                let stream = tokio_tungstenite::accept_async(maybe_tls)
                         .await.expect("failed to handshake");
                 
                 $f(stream, client_index).await.expect("server function failed");
@@ -77,8 +68,9 @@ macro_rules! client_setup {
         let server_addr = format!("127.0.0.1:{}", $p);
         let tcp = tokio::net::TcpStream::connect(server_addr.clone()).await
                 .expect("failed to connect");
+        let maybe_tls = tokio_tungstenite::MaybeTlsStream::Plain(tcp);
         let (stream, _) = tokio_tungstenite::client_async(
-                format!("ws://{}", server_addr), tcp).await
+                format!("ws://{}", server_addr), maybe_tls).await
                 .expect("client failed to connect");
         
         stream
