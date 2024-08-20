@@ -26,7 +26,7 @@ use crate::room_code::RoomCode;
 
 use std::fmt;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum LobbyCommand {
     CreateRoom,
     JoinRoom(RoomCode),
