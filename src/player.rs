@@ -91,9 +91,8 @@ pub struct SendCloseContext {
 /// 
 /// This task should be used whenever the server wants to initialise the process
 /// of closing the connection with a client. If however the client is the one to
-/// initialise it, then the instance handling the client connection should
-/// simply echo it back, send messages where necessary, and then drop the
-/// connection out of scope.
+/// initialise it, then the library will automatically send an echo frame back,
+/// after which the connection should be dropped.
 /// 
 /// Since this task can potentially take up to a few seconds to complete, it
 /// should be added to a task tracker so that connections are closed gracefully
@@ -260,27 +259,14 @@ impl PlayerJoining {
                             LobbyCommand::CloseConnection(CloseCode::Protocol)
                         },
                         Message::Close(maybe_close_frame) => {
-                            let echo_frame = match maybe_close_frame {
-                                Some(close_frame) => CloseFrame {
-                                    code: close_frame.code,
-                                    reason: close_frame.reason
-                                },
-                                None => CloseFrame {
-                                    code: CloseCode::Status,
-                                    reason: "".into()
-                                },
-                            };
+                            if let Some(close_frame) = maybe_close_frame {
+                                debug!(code = %close_frame, "client sent close message");
+                            } else {
+                                debug!("client sent close message");
+                            }
 
-                            debug!(close_code = %echo_frame.code,
-                                    "client sent close message");
-
-                            // As per the protocol, send back an echo of the
-                            // close message.
-                            let echo = Message::Close(Some(echo_frame));
-                            if let Err(e) = context.client_stream.send(echo).await {
-                                error!(error = %e, "error sending close echo");
-                            };
-
+                            // We don't need to manually send a close frame
+                            // back, as the library does this for us.
                             LobbyCommand::DropConnection
                         },
                         Message::Frame(_) => {
