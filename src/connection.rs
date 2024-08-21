@@ -164,3 +164,154 @@ pub async fn accept_connection(mut context: ConnectionContext) {
 
     trace!("finished accepting connection");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use futures_util::sink::SinkExt;
+    use futures_util::stream::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    struct TestContext {
+        pub port: u16,
+        pub tls_acceptor: Option<TlsAcceptorAsync>,
+        pub max_payload_size: usize,
+        pub send_shutdown: bool,
+    }
+
+    async fn test_with_context(test: TestContext) {
+        let is_encrypted = test.tls_acceptor.is_some();
+
+        let (ready_send, ready_receive) = tokio::sync::oneshot::channel();
+        let (lobby_send, mut lobby_receive) = tokio::sync::mpsc::channel(1);
+        let (shutdown_send, shutdown_receive) = tokio::sync::broadcast::channel(1);
+
+        let handle = tokio::spawn(async move {
+            let server_addr = format!("127.0.0.1:{}", test.port);
+            let listener = tokio::net::TcpListener::bind(server_addr).await
+                    .expect("failed to create listener");
+            ready_send.send(()).expect("failed to send ready signal");
+
+            let (conn, addr) = listener.accept().await
+                    .expect("failed to accept connection");
+            
+            accept_connection(ConnectionContext {
+                tcp_stream: conn,
+                tls_acceptor: test.tls_acceptor,
+                remote_addr: addr,
+                max_message_size: test.max_payload_size + 100,
+                max_payload_size: test.max_payload_size,
+                send_to_lobby: lobby_send,
+                shutdown_signal: shutdown_receive
+            }).await;
+        });
+
+        ready_receive.await.expect("server is not ready");
+
+        let server_addr = format!("localhost:{}", test.port);
+        let tcp = tokio::net::TcpStream::connect(server_addr.clone()).await
+                .expect("failed to connect");
+
+        let maybe_tls = if is_encrypted {
+            // Add the test certificate as trusted.
+            let cert_bytes = tokio::fs::read("tests/certificate.pem").await
+                    .expect("failed to read test certificate");
+            let cert = tokio_native_tls::native_tls::Certificate::from_pem(&cert_bytes)
+                    .expect("failed to load test certificate");
+            
+            let sync_connector = tokio_native_tls::native_tls::TlsConnector::builder()
+                    .add_root_certificate(cert)
+                    .build()
+                    .expect("failed to build tls connector");
+
+            let async_connector: tokio_native_tls::TlsConnector = sync_connector.into();
+            let tls_stream = async_connector.connect("localhost", tcp)
+                    .await.expect("failed to establish tls connection");
+            
+            tokio_tungstenite::MaybeTlsStream::NativeTls(tls_stream)
+        } else {
+            tokio_tungstenite::MaybeTlsStream::Plain(tcp)
+        };
+        
+        let req_addr = if is_encrypted {
+            format!("wss://{}", server_addr)
+        } else {
+            format!("ws://{}", server_addr)
+        };
+
+        if test.send_shutdown {
+            shutdown_send.send(()).expect("failed to send shutdown signal");
+            tokio_tungstenite::client_async(req_addr, maybe_tls).await
+                    .expect_err("shutdown did not stop accept");
+        } else {
+            let (mut stream, _) = tokio_tungstenite::client_async(req_addr,
+                    maybe_tls).await.expect("client failed to connect");
+
+            // When the stream is accepted, it should be sent to the lobby along
+            // with the client's address.
+            let (mut srv_stream, our_addr) = lobby_receive.recv().await
+                    .expect("did not receive accepted stream");
+            assert_eq!(our_addr.ip().to_string(), "127.0.0.1");
+
+            // Send a message within the payload limit.
+            let message_ok = "A".repeat(test.max_payload_size);
+            stream.send(Message::Text(message_ok.clone())).await
+                    .expect("failed to send message");
+            let recv = srv_stream.next().await.unwrap()
+                    .expect("failed to receive valid message");
+            assert_eq!(recv, Message::Text(message_ok));
+
+            // Send a message outside of the payload limit.
+            let message_err = "E".repeat(test.max_payload_size + 1);
+            stream.send(Message::Text(message_err.clone())).await
+                    .expect("failed to send message");
+            srv_stream.next().await.unwrap()
+                    .expect_err("invalid message was received as valid");
+        }
+
+        handle.await.expect("task was aborted");
+    }
+
+    #[tokio::test]
+    async fn accept_plain() {
+        test_with_context(TestContext {
+            port: 11000,
+            tls_acceptor: None,
+            max_payload_size: 1000,
+            send_shutdown: false
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn accept_tls() {
+        let cert_bytes = tokio::fs::read("tests/certificate.pem").await
+                .expect("failed to read test certificate");
+        let key_bytes = tokio::fs::read("tests/private.pem").await
+                .expect("failed to read test private key");
+        
+        let identity = tokio_native_tls::native_tls::Identity::from_pkcs8(
+                &cert_bytes, &key_bytes).expect("failed to create cryptographic identity");
+        
+        let sync_acceptor = tokio_native_tls::native_tls::TlsAcceptor::new(identity)
+                .expect("failed to create acceptor from identity");
+        let async_acceptor = tokio_native_tls::TlsAcceptor::from(sync_acceptor);
+
+        test_with_context(TestContext {
+            port: 11001,
+            tls_acceptor: Some(async_acceptor),
+            max_payload_size: 10000,
+            send_shutdown: false
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn check_shutdown() {
+        test_with_context(TestContext {
+            port: 11002,
+            tls_acceptor: None,
+            max_payload_size: 100,
+            send_shutdown: true
+        }).await;
+    }
+}
