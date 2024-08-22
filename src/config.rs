@@ -254,7 +254,7 @@ impl VariableConfig {
                 key_data.leaf_decor_mut().set_prefix(prefix);
             }
             None => {
-                warn!(key, "key not found in config");
+                error!(key, "key not found in config, cannot set prefix");
             }
         }
     }
@@ -295,7 +295,7 @@ pub async fn update_config_task(
     config_watch: watch::Sender<VariableConfig>,
     mut shutdown_signal: broadcast::Receiver<()>,
 ) {
-    info!("task started");
+    trace!("task started");
 
     // TODO: Find a more efficient way to check if the file has been updated -
     // maybe something like inotify, but async-safe?
@@ -321,7 +321,9 @@ pub async fn update_config_task(
                             trace!("config unchanged");
                         }
                     },
-                    Err(e) => {error!(error = %e, "failed to read config file");}
+                    Err(e) => {
+                        warn!(error = %e, "failed to read config file, config has not been updated");
+                    }
                 }
             },
             _ = shutdown_signal.recv() => {
@@ -331,7 +333,7 @@ pub async fn update_config_task(
         }
     }
 
-    info!("task stopped");
+    trace!("task stopped");
 }
 
 #[cfg(test)]

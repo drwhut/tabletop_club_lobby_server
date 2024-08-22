@@ -21,16 +21,28 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+//! A series of message types to be sent between the lobby, rooms, and clients.
+
 use crate::close_code::CloseCode;
 use crate::room_code::RoomCode;
 
 use std::fmt;
 
+/// A command from an incoming client to the lobby.
 #[derive(Debug, Eq, PartialEq)]
 pub enum LobbyCommand {
+    /// The client wishes to create a new room, with itself as the host.
     CreateRoom,
+
+    /// The client wishes to join an existing room, with the given room code.
     JoinRoom(RoomCode),
+
+    /// The client's connection should be closed gracefully with the given close
+    /// code.
     CloseConnection(CloseCode),
+
+    /// The client's connection should be dropped, as there is nothing else to
+    /// do.
     DropConnection,
 }
 
@@ -45,14 +57,18 @@ impl fmt::Display for LobbyCommand {
     }
 }
 
+/// A request from a client (with the given `handle_id`) to the lobby.
 #[derive(Debug)]
 pub struct LobbyRequest {
     pub handle_id: u32,
     pub command: LobbyCommand,
 }
 
+/// A command from a client to the room it has joined.
 #[derive(Debug, Eq, PartialEq)]
 pub enum RoomCommand {
+    /// The client's connection should be dropped, as there is nothing else we
+    /// can do with it.
     DropConnection,
 }
 
@@ -64,12 +80,15 @@ impl fmt::Display for RoomCommand {
     }
 }
 
+/// A request from a player (with the given `player_id`) to the room the player
+/// has joined.
 #[derive(Debug)]
 pub struct RoomRequest {
     pub player_id: u32,
     pub command: RoomCommand,
 }
 
+/// A notification from a room, to any given player.
 #[derive(Debug)]
 pub enum RoomNotification {
     

@@ -153,7 +153,7 @@ pub async fn accept_connection(mut context: ConnectionContext) {
                 .send((ws_stream, context.remote_addr))
                 .await;
             if let Err(e) = res {
-                warn!(error = %e, "lobby receiver dropped, assuming server is shutting down");
+                error!(error = %e, "lobby receiver dropped, is the server shutting down?");
             }
         } else {
             trace!("skipped accepting websocket connection");

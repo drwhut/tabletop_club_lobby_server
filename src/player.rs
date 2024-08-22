@@ -125,20 +125,24 @@ pub async fn send_close(mut context: SendCloseContext) {
                 Ok(close_code_res) => match close_code_res {
                     Ok(close_code_received) => {
                         if close_code_received == context.close_code {
-                            trace!("echo was expected value");
+                            trace!("received echo was the expected value");
                         } else {
-                            debug!(%close_code_received, "echo was not expected value");
+                            warn!(
+                                expected = %context.close_code,
+                                got = %close_code_received,
+                                "received echo was not the expected value"
+                            );
                         }
                     },
                     Err(_) => {} // Call should output error log.
                 },
                 Err(_) => {
-                    trace!("did not receive echo in time");
+                    warn!("did not receive echo in time, dropping connection");
                 }
             }
         },
         Err(e) => {
-            warn!(error = %e, "failed to send close code");
+            warn!(error = %e, "failed to send close code, dropping connection");
         },
     }
 
@@ -158,7 +162,7 @@ async fn read_until_close_frame(stream: &mut PlayerStream) -> Result<CloseCode, 
                         if let Some(close_frame) = maybe_close_frame {
                             return Ok(close_frame.code);
                         } else {
-                            trace!("echo did not contain close frame");
+                            warn!("received echo did not contain close frame, dropping connection");
                             return Err(());
                         }
                     },
@@ -168,13 +172,12 @@ async fn read_until_close_frame(stream: &mut PlayerStream) -> Result<CloseCode, 
                     _ => {}
                 },
                 Err(e) => {
-                    // TODO: Should this be a trace/debug instead?
-                    warn!(error = %e, "error receiving echo event");
+                    warn!(error = %e, "error receiving echo, dropping connection");
                     return Err(());
                 },
             }
             None => {
-                trace!("client closed connection early");
+                error!("client stream ended early");
                 return Err(());
             }
         }
@@ -238,32 +241,37 @@ impl PlayerJoining {
                                 PlayerRequest::Host => LobbyCommand::CreateRoom,
                                 PlayerRequest::Join(room_code) => LobbyCommand::JoinRoom(room_code),
                                 _ => {
-                                    warn!(request = %req, "client sent request while not in a room");
+                                    error!(request = %req, "client sent request before joining a room");
                                     LobbyCommand::CloseConnection(CustomCloseCode::NotInRoom.into())
                                 }
                             },
                             Err(e) => {
-                                warn!(error = %e, "error parsing request");
+                                error!(error = %e, "error parsing request from client");
                                 LobbyCommand::CloseConnection(parse_error_to_close_code(e))
                             },
                         },
                         Message::Binary(_) => {
-                            warn!("received binary message");
+                            error!("received binary message from client");
                             LobbyCommand::CloseConnection(CloseCode::Unsupported)
                         },
                         Message::Ping(_) => {
-                            warn!("received ping");
+                            error!("received ping from client");
                             LobbyCommand::CloseConnection(CloseCode::Protocol)
                         },
                         Message::Pong(_) => {
-                            warn!("received pong before client joined room");
+                            error!("received pong from client before joining a room");
                             LobbyCommand::CloseConnection(CloseCode::Protocol)
                         },
                         Message::Close(maybe_close_frame) => {
                             if let Some(close_frame) = maybe_close_frame {
-                                debug!(code = %close_frame, "client sent close message");
+                                if close_frame.code == CloseCode::Normal {
+                                    info!("client is closing connection");
+                                } else {
+                                    warn!(code = %close_frame,
+                                            "client sent close message");
+                                }
                             } else {
-                                debug!("client sent close message");
+                                warn!("client sent close message");
                             }
 
                             // We don't need to manually send a close frame
@@ -277,7 +285,7 @@ impl PlayerJoining {
                         },
                     },
                     Err(e) => {
-                        warn!(error = %e, "websocket error");
+                        error!(error = %e, "error receiving request from client");
                         match websocket_error_to_close_code(e) {
                             Some(close_code) => LobbyCommand::CloseConnection(close_code),
                             None => LobbyCommand::DropConnection,
@@ -285,15 +293,12 @@ impl PlayerJoining {
                     },
                 },
                 None => {
-                    // TODO: Re-think which level these kinds of logs should be.
-                    // Remember that the trace level has a ton of debugging info
-                    // from the WebSocket library.
-                    trace!("stream ended");
+                    error!("client stream ended early");
                     LobbyCommand::DropConnection
                 },
             },
             Err(_) => {
-                trace!("client did not send a request in time");
+                error!("did not receive a request from the client in time");
                 LobbyCommand::CloseConnection(CustomCloseCode::DidNotJoinRoom.into())
             },
         };
@@ -301,7 +306,7 @@ impl PlayerJoining {
         let request = LobbyRequest { handle_id: context.handle_id, command };
         match context.lobby_request_sender.send((request, context.client_stream)).await {
             Ok(_) => trace!("sent request to the lobby"),
-            Err(_) => error!("lobby request receiver dropped"),
+            Err(e) => error!(error = %e, "lobby request receiver dropped"),
         };
     }
 }
@@ -413,16 +418,18 @@ impl PlayerInRoom {
     /// Handle communication with this player's client.
     #[tracing::instrument(name="player", skip_all, fields(room = %context.room_code, player_id = context.player_id))]
     async fn task(mut context: PlayerInRoomContext) {
+        trace!("sending room details to the player");
+
         send_msg!(context, Message::Text(format!("I: {}\n", context.player_id)),
-                "failed to send own ID to incoming player");
+                "failed to send player id to new player");
         
         for other_id in context.other_ids {
             send_msg!(context, Message::Text(format!("N: {}\n", other_id)),
-                    "failed to send player ID to incoming player");
+                    "failed to send other player id to new player");
         }
 
         send_msg!(context, Message::Text(format!("J: {}\n", context.room_code)),
-                "failed to send room code to incoming player");
+                "failed to send room code to new player");
         
         // Read the server configuration as it currently stands - it may be
         // updated later.
@@ -444,6 +451,8 @@ impl PlayerInRoom {
         // A flag to let us know if we are expecting a pong from the client.
         // The client should only send us one after we have sent a ping.
         let mut expecting_pong = false;
+
+        info!("setup complete");
 
         loop {
             tokio::select! {
@@ -467,42 +476,48 @@ impl PlayerInRoom {
                                         },
 
                                         _ => {
-                                            warn!(req = %req, "client sent request, already in a room");
+                                            error!(request = %req, "client sent request while in a room");
                                             close_connection!(context,
                                                     CustomCloseCode::AlreadyInRoom.into());
                                             break;
                                         }
                                     },
                                     Err(e) => {
-                                        warn!(error = %e, "failed to parse player message");
+                                        error!(error = %e, "error parsing request from client");
                                         let close_code = parse_error_to_close_code(e);
                                         close_connection!(context, close_code);
                                         break;
                                     },
                                 },
                                 Message::Binary(_) => {
-                                    warn!("client sent binary message");
+                                    error!("received binary message from client");
                                     close_connection!(context, CloseCode::Unsupported);
                                     break;
                                 },
                                 Message::Ping(_) => {
                                     // Only the server is allowed to send ping
                                     // messages.
-                                    warn!("client sent ping message");
+                                    error!("received unexpected ping from client");
+                                    close_connection!(context, CloseCode::Protocol);
+                                    break;
                                 },
                                 Message::Pong(_) => {
                                     if expecting_pong {
                                         trace!("received pong from client");
                                         expecting_pong = false;
                                     } else {
-                                        warn!("received unexpected pong from client");
+                                        error!("received unexpected pong from client");
                                         close_connection!(context, CloseCode::Protocol);
                                         break;
                                     }
                                 },
                                 Message::Close(maybe_close_frame) => {
                                     if let Some(close_frame) = maybe_close_frame {
-                                        warn!(close = %close_frame, "client sent close message");
+                                        if close_frame.code == CloseCode::Normal {
+                                            info!("client is closing connection");
+                                        } else {
+                                            warn!(code = %close_frame, "client sent close message");
+                                        }
                                     } else {
                                         warn!("client sent close message");
                                     }
@@ -514,8 +529,7 @@ impl PlayerInRoom {
                                 },
                                 Message::Frame(_) => {
                                     // Should never receive a raw frame!
-                                    error!("received raw frame");
-
+                                    error!("received raw frame from stream");
                                     drop_connection!(context);
                                     break;
                                 },
@@ -534,14 +548,13 @@ impl PlayerInRoom {
                             }
                         },
                         None => {
-                            error!("client stream ended");
+                            error!("client stream ended early");
                             drop_connection!(context);
                             break;
                         }
                     },
                     Err(_) => {
-                        // Assume the connection has been lost.
-                        warn!("connection timed out with client");
+                        warn!("connection timed out, dropping client");
                         drop_connection!(context);
                         break;
                     }
@@ -560,6 +573,8 @@ impl PlayerInRoom {
                 }
             }
         }
+
+        trace!("task stopped");
     }
 }
 
