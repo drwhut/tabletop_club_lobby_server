@@ -61,6 +61,9 @@ pub struct ServerContext {
 }
 
 /// The wrapper around the lobby server task.
+/// 
+/// **TODO:** Turn this into just a function, since we don't need to run
+/// multiple instances of it.
 pub struct Server {
     handle: JoinHandle<()>,
 }

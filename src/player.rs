@@ -22,16 +22,17 @@ SOFTWARE.
 */
 
 use crate::close_code::{CloseCode, CustomCloseCode};
-use crate::message::{LobbyCommand, LobbyRequest};
+use crate::config::VariableConfig;
+use crate::message::{LobbyCommand, LobbyRequest, RoomCommand, RoomRequest, RoomNotification};
 use crate::room_code::RoomCode;
 
 use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
 use std::fmt;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{timeout, Duration};
+use tokio::time::{interval, timeout, Duration};
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::Message;
@@ -302,6 +303,263 @@ impl PlayerJoining {
             Ok(_) => trace!("sent request to the lobby"),
             Err(_) => error!("lobby request receiver dropped"),
         };
+    }
+}
+
+/// The data required to spawn a [`PlayerInRoom`] instance.
+pub struct PlayerInRoomContext {
+    /// The WebSocket stream for this player.
+    pub client_stream: PlayerStream,
+
+    /// The room the player has joined.
+    pub room_code: RoomCode,
+
+    /// The ID given to this player within the room.
+    pub player_id: PlayerID,
+
+    /// The IDs of the other players in the room at the time of joining.
+    /// 
+    /// **NOTE:** This list is only used once at the start of the instance. The
+    /// "true" list of players is stored in the room itself.
+    pub other_ids: Vec<PlayerID>,
+
+    /// A channel for sending requests to the room.
+    pub room_request_sender: mpsc::Sender<RoomRequest>,
+
+    /// A channel for sending the `client_stream` to the room, so that it can
+    /// gracefully close the connection with the given close code.
+    pub room_close_sender: mpsc::Sender<(PlayerID, PlayerStream, CloseCode)>,
+
+    /// A channel for receiving notifications from the room.
+    pub room_notification_receiver: mpsc::Receiver<RoomNotification>,
+
+    /// A watch channel for the server configuration.
+    pub config_receiver: watch::Receiver<VariableConfig>,
+
+    /// The shutdown signal receiver from the main thread.
+    pub shutdown_signal: broadcast::Receiver<()>,
+}
+
+/// An instance which handles communication with a client after they have joined
+/// a room within the lobby.
+/// 
+/// The instance first sends the client their [`PlayerID`], followed by the IDs
+/// of the other clients that are in the room. After that, the [`RoomCode`] is
+/// sent to the client, whether they hosted a room, or joined an existing one.
+/// 
+/// Once the data has been sent, it is then up to the client whether they want
+/// to establish a peer-to-peer connection with the other players or not. As of
+/// Tabletop Club v0.2.0, the host of the room is the one that initiates the
+/// process of establishing connections with incoming clients.
+pub struct PlayerInRoom {
+    handle: JoinHandle<()>,
+}
+
+/// A helper macro for sending a request to the room to close this player's
+/// connection gracefully.
+macro_rules! close_connection {
+    ($c:ident, $f:expr) => {
+        let room_req = ($c.player_id, $c.client_stream, $f);
+
+        if let Err(e) = $c.room_close_sender.send(room_req).await {
+            error!(error = %e, "room close receiver dropped");
+        }
+    }
+}
+
+/// A helper macro for sending a request to the room to immediately drop this
+/// player's connection.
+macro_rules! drop_connection {
+    ($c:ident) => {
+        let room_req = RoomRequest {
+            player_id: $c.player_id,
+            command: RoomCommand::DropConnection
+        };
+
+        if let Err(e) = $c.room_request_sender.send(room_req).await {
+            error!(error = %e, "room request receiver dropped");
+        }
+    }
+}
+
+/// A helper macro for sending messages to the client, and exiting the task if
+/// there was an error sending the message.
+macro_rules! send_msg {
+    ($c:ident, $s:expr, $e:literal) => {
+        if let Err(e) = $c.client_stream.send($s).await {
+            error!(error = %e, $e);
+
+            // Let the room know that we can no longer send messages reliably.
+            drop_connection!($c);
+
+            return;
+        }
+    }
+}
+
+impl PlayerInRoom {
+    /// Spawn a new instance of [`PlayerInRoom`] with the given `context`.
+    pub fn spawn(context: PlayerInRoomContext) -> Self {
+        Self {
+            handle: tokio::spawn(Self::task(context)),
+        }
+    }
+
+    /// Get the [`JoinHandle`] for this instance.
+    pub fn handle(&mut self) -> &mut JoinHandle<()> {
+        &mut self.handle
+    }
+
+    /// Handle communication with this player's client.
+    #[tracing::instrument(name="player", skip_all, fields(room = %context.room_code, player_id = context.player_id))]
+    async fn task(mut context: PlayerInRoomContext) {
+        send_msg!(context, Message::Text(format!("I: {}\n", context.player_id)),
+                "failed to send own ID to incoming player");
+        
+        for other_id in context.other_ids {
+            send_msg!(context, Message::Text(format!("N: {}\n", other_id)),
+                    "failed to send player ID to incoming player");
+        }
+
+        send_msg!(context, Message::Text(format!("J: {}\n", context.room_code)),
+                "failed to send room code to incoming player");
+        
+        // Read the server configuration as it currently stands - it may be
+        // updated later.
+        let starting_config = *context.config_receiver.borrow_and_update();
+        let ping_interval_secs = starting_config.ping_interval_secs;
+        let response_time_limit_secs = starting_config.response_time_limit_secs;
+
+        debug!(ping_interval_secs, response_time_limit_secs, "read config");
+
+        // Create dedicated [`Duration`] structures for time limits.
+        let mut ping_interval_duration = Duration::from_secs(ping_interval_secs);
+        let mut response_time_limit = Duration::from_secs(response_time_limit_secs);
+
+        // We need to send a ping every so often, so that we know whether the
+        // connection is still alive or not. The interval depends on the server
+        // configuration, which can change during run-time.
+        let mut ping_interval = interval(ping_interval_duration);
+
+        // A flag to let us know if we are expecting a pong from the client.
+        // The client should only send us one after we have sent a ping.
+        let mut expecting_pong = false;
+
+        loop {
+            tokio::select! {
+                res = timeout(response_time_limit, context.client_stream.next()) => match res {
+                    Ok(res) => match res {
+                        Some(res) => match res {
+                            Ok(msg) => match msg {
+                                Message::Text(text) => match parse_player_request(&text) {
+                                    Ok(req) => match req {
+                                        PlayerRequest::Seal => {
+
+                                        },
+                                        PlayerRequest::Offer(target_id, payload) => {
+
+                                        },
+                                        PlayerRequest::Answer(target_id, payload) => {
+
+                                        },
+                                        PlayerRequest::Candidate(target_id, payload) => {
+
+                                        },
+
+                                        _ => {
+                                            warn!(req = %req, "client sent request, already in a room");
+                                            close_connection!(context,
+                                                    CustomCloseCode::AlreadyInRoom.into());
+                                            break;
+                                        }
+                                    },
+                                    Err(e) => {
+                                        warn!(error = %e, "failed to parse player message");
+                                        let close_code = parse_error_to_close_code(e);
+                                        close_connection!(context, close_code);
+                                        break;
+                                    },
+                                },
+                                Message::Binary(_) => {
+                                    warn!("client sent binary message");
+                                    close_connection!(context, CloseCode::Unsupported);
+                                    break;
+                                },
+                                Message::Ping(_) => {
+                                    // Only the server is allowed to send ping
+                                    // messages.
+                                    warn!("client sent ping message");
+                                },
+                                Message::Pong(_) => {
+                                    if expecting_pong {
+                                        trace!("received pong from client");
+                                        expecting_pong = false;
+                                    } else {
+                                        warn!("received unexpected pong from client");
+                                        close_connection!(context, CloseCode::Protocol);
+                                        break;
+                                    }
+                                },
+                                Message::Close(maybe_close_frame) => {
+                                    if let Some(close_frame) = maybe_close_frame {
+                                        warn!(close = %close_frame, "client sent close message");
+                                    } else {
+                                        warn!("client sent close message");
+                                    }
+
+                                    // The library should have automatically
+                                    // sent an echo frame back for us.
+                                    drop_connection!(context);
+                                    break;
+                                },
+                                Message::Frame(_) => {
+                                    // Should never receive a raw frame!
+                                    error!("received raw frame");
+
+                                    drop_connection!(context);
+                                    break;
+                                },
+                            },
+                            Err(e) => {
+                                error!(error = %e, "error receiving message from client");
+                                let maybe_close_code = websocket_error_to_close_code(e);
+
+                                if let Some(close_code) = maybe_close_code {
+                                    close_connection!(context, close_code);
+                                } else {
+                                    drop_connection!(context);
+                                }
+
+                                break;
+                            }
+                        },
+                        None => {
+                            error!("client stream ended");
+                            drop_connection!(context);
+                            break;
+                        }
+                    },
+                    Err(_) => {
+                        // Assume the connection has been lost.
+                        warn!("connection timed out with client");
+                        drop_connection!(context);
+                        break;
+                    }
+                },
+
+                // NOTE: The first ping will occur immediately.
+                _ = ping_interval.tick() => {
+                    send_msg!(context, Message::Ping(vec![]), "failed to send ping");
+                    expecting_pong = true;
+                },
+
+                // If we get the shutdown signal from the main thread, let the
+                // connection drop.
+                _ = context.shutdown_signal.recv() => {
+                    break;
+                }
+            }
+        }
     }
 }
 

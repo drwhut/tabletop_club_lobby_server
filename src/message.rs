@@ -50,3 +50,27 @@ pub struct LobbyRequest {
     pub handle_id: u32,
     pub command: LobbyCommand,
 }
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum RoomCommand {
+    DropConnection,
+}
+
+impl fmt::Display for RoomCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DropConnection => write!(f, "drop connection"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RoomRequest {
+    pub player_id: u32,
+    pub command: RoomCommand,
+}
+
+#[derive(Debug)]
+pub enum RoomNotification {
+    
+}

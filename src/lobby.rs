@@ -62,6 +62,9 @@ pub struct LobbyContext {
 }
 
 /// Keeps track of active rooms, and players waiting to create or join them.
+/// 
+/// **TODO:** Turn this into just a function, since we don't need to run
+/// multiple instances of it.
 pub struct Lobby {
     handle: JoinHandle<()>,
 }
