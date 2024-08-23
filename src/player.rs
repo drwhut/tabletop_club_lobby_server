@@ -391,12 +391,35 @@ macro_rules! drop_connection {
 /// there was an error sending the message.
 macro_rules! send_msg {
     ($c:ident, $s:expr, $e:literal) => {
+        // NOTE: This call will produce a lot of trace logs.
         if let Err(e) = $c.client_stream.send($s).await {
             error!(error = %e, $e);
 
             // Let the room know that we can no longer send messages reliably.
             drop_connection!($c);
 
+            return;
+        }
+    }
+}
+
+/// A helper macro for sending requests to the room, and exiting the task if
+/// there was an error sending the request.
+macro_rules! send_req {
+    ($c:ident, $r:expr) => {
+        let room_req = RoomRequest {
+            player_id: $c.player_id,
+            command: $r
+        };
+
+        // NOTE: The room task will log the request in more detail.
+        trace!("sending request to the room task");
+
+        if let Err(e) = $c.room_request_sender.send(room_req).await {
+            error!(error = %e, "room request receiver dropped");
+
+            // The task can no longer function properly if the room task has
+            // suddenly disappeared, so forcefully stop the task.
             return;
         }
     }
@@ -440,7 +463,7 @@ impl PlayerInRoom {
         debug!(ping_interval_secs, response_time_limit_secs, "read config");
 
         // Create dedicated [`Duration`] structures for time limits.
-        let mut ping_interval_duration = Duration::from_secs(ping_interval_secs);
+        let ping_interval_duration = Duration::from_secs(ping_interval_secs);
         let mut response_time_limit = Duration::from_secs(response_time_limit_secs);
 
         // We need to send a ping every so often, so that we know whether the
@@ -463,16 +486,29 @@ impl PlayerInRoom {
                                 Message::Text(text) => match parse_player_request(&text) {
                                     Ok(req) => match req {
                                         PlayerRequest::Seal => {
-
+                                            send_req!(context,
+                                                    RoomCommand::SealRoom);
                                         },
                                         PlayerRequest::Offer(target_id, payload) => {
-
+                                            send_req!(context,
+                                                    RoomCommand::SendOffer(
+                                                        target_id,
+                                                        payload
+                                                    ));
                                         },
                                         PlayerRequest::Answer(target_id, payload) => {
-
+                                            send_req!(context,
+                                                RoomCommand::SendAnswer(
+                                                    target_id,
+                                                    payload
+                                                ));
                                         },
                                         PlayerRequest::Candidate(target_id, payload) => {
-
+                                            send_req!(context,
+                                                RoomCommand::SendCandidate(
+                                                    target_id,
+                                                    payload
+                                                ));
                                         },
 
                                         _ => {
@@ -560,10 +596,86 @@ impl PlayerInRoom {
                     }
                 },
 
+                res = context.room_notification_receiver.recv() => match res {
+                    Some(notification) => {
+                        debug!(%notification, "received notification from room");
+                        match notification {
+                            RoomNotification::PlayerJoined(id) => {
+                                send_msg!(context,
+                                        Message::Text(format!("N: {}\n", id)),
+                                        "failed to send id of joining player");
+                            },
+                            RoomNotification::PlayerLeft(id) => {
+                                send_msg!(context,
+                                        Message::Text(format!("D: {}\n", id)),
+                                        "failed to send id of leaving player");
+                            },
+                            RoomNotification::OfferReceived(from, payload) => {
+                                let msg = format!("O: {}\n{}", from, payload);
+                                send_msg!(context, Message::Text(msg),
+                                        "failed to send player's offer");
+                            },
+                            RoomNotification::AnswerReceived(from, payload) => {
+                                let msg = format!("A: {}\n{}", from, payload);
+                                send_msg!(context, Message::Text(msg),
+                                        "failed to send player's answer");
+                            },
+                            RoomNotification::CandidateReceived(from, payload) => {
+                                let msg = format!("C: {}\n{}", from, payload);
+                                send_msg!(context, Message::Text(msg),
+                                        "failed to send player's candidate");
+                            },
+                            RoomNotification::HostLeft => {
+                                trace!("host has left room, closing connection");
+                                close_connection!(context,
+                                        CustomCloseCode::HostDisconnected.into());
+                                break;
+                            },
+                            RoomNotification::RoomSealed => {
+                                trace!("room has been sealed, closing connection");
+                                close_connection!(context,
+                                        CustomCloseCode::RoomSealed.into());
+                                break;
+                            },
+                            RoomNotification::Error(code) => {
+                                error!(%code, "an error occured, closing connection");
+                                close_connection!(context, code);
+                                break;
+                            },
+                        }
+                    },
+                    None => {
+                        // If the sender got dropped, that means the room task
+                        // no longer exists, which means - we're boned.
+                        error!("room notification sender dropped");
+                        return;
+                    }
+                },
+
                 // NOTE: The first ping will occur immediately.
                 _ = ping_interval.tick() => {
+                    trace!("sending ping");
                     send_msg!(context, Message::Ping(vec![]), "failed to send ping");
                     expecting_pong = true;
+                },
+
+                Ok(()) = context.config_receiver.changed() => {
+                    let new_config = context.config_receiver.borrow_and_update();
+
+                    let ping_interval_secs = new_config.ping_interval_secs;
+                    let response_time_limit_secs = new_config.response_time_limit_secs;
+
+                    info!(
+                        ping_interval_secs,
+                        response_time_limit_secs, "player config updated"
+                    );
+
+                    // Update the [`Duration`]s for timings.
+                    let ping_interval_duration = Duration::from_secs(ping_interval_secs);
+                    response_time_limit = Duration::from_secs(response_time_limit_secs);
+
+                    // Update the interval future with the new duration.
+                    ping_interval = interval(ping_interval_duration);
                 },
 
                 // If we get the shutdown signal from the main thread, let the

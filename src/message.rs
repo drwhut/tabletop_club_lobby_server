@@ -65,16 +65,42 @@ pub struct LobbyRequest {
 }
 
 /// A command from a client to the room it has joined.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RoomCommand {
+    /// Ask for the room to be sealed - this will close the connection of all
+    /// clients currently in the room, and it will prevent new clients from
+    /// joining the room as well.
+    SealRoom,
+
+    /// Send a WebRTC offer to another player in the room.
+    SendOffer(u32, String),
+
+    /// Send a WebRTC answer to another player in the room.
+    SendAnswer(u32, String),
+
+    /// Send a WebRTC candidate to another player in the room.
+    SendCandidate(u32, String),
+
     /// The client's connection should be dropped, as there is nothing else we
     /// can do with it.
+    /// 
+    /// **NOTE:** Unlike in [`LobbyCommand`], closing a connection is done in
+    /// a separate channel, since the room needs the stream from the player task
+    /// in order to close the connection properly - all of the commands in here
+    /// do not need the client's stream within the room task.
     DropConnection,
 }
 
 impl fmt::Display for RoomCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SealRoom => write!(f, "seal room"),
+
+            // DO NOT output payloads, as they can contain sensitive information!
+            Self::SendOffer(player_id, _) => write!(f, "send offer to: {}", player_id),
+            Self::SendAnswer(player_id, _) => write!(f, "send answer to: {}", player_id),
+            Self::SendCandidate(player_id, _) => write!(f, "send candidate to: {}", player_id),
+
             Self::DropConnection => write!(f, "drop connection"),
         }
     }
@@ -91,5 +117,45 @@ pub struct RoomRequest {
 /// A notification from a room, to any given player.
 #[derive(Debug)]
 pub enum RoomNotification {
-    
+    /// A new player with the given ID has joined the room.
+    PlayerJoined(u32),
+
+    /// The player with the given ID has left the room.
+    /// 
+    /// **NOTE:** This does NOT include the host. If the host leaves the room,
+    /// [`RoomNotification::HostLeft`] will be sent instead.
+    PlayerLeft(u32),
+
+    /// Received a WebRTC offer from the given player.
+    OfferReceived(u32, String),
+
+    /// Received a WebRTC answer from the given player.
+    AnswerReceived(u32, String),
+
+    /// Received a WebRTC candidate from the given player.
+    CandidateReceived(u32, String),
+
+    /// The host has left the room, closing it.
+    HostLeft,
+
+    /// The room has been sealed by the host, closing it.
+    RoomSealed,
+
+    /// An error occured, and the given close code needs to be sent out.
+    Error(CloseCode),
+}
+
+impl fmt::Display for RoomNotification {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RoomNotification::PlayerJoined(id) => write!(f, "player joined: {}", id),
+            RoomNotification::PlayerLeft(id) => write!(f, "player left: {}", id),
+            RoomNotification::OfferReceived(from, _) => write!(f, "offer from: {}", from),
+            RoomNotification::AnswerReceived(from, _) => write!(f, "answer from: {}", from),
+            RoomNotification::CandidateReceived(from, _) => write!(f, "candidate from: {}", from),
+            RoomNotification::HostLeft => write!(f, "host left"),
+            RoomNotification::RoomSealed => write!(f, "room sealed"),
+            RoomNotification::Error(code) => write!(f, "error (close: {})", code),
+        }
+    }
 }
