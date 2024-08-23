@@ -30,13 +30,16 @@ SOFTWARE.
 /// - The number of connections to accept before the task stops.
 /// - The function to call after each connection is accepted.
 /// 
-/// The handle for the spawned task is returned.
+/// The handle for the spawned task is returned, along with a sender for the
+/// shutdown signal if the task needs it.
 #[macro_export]
 macro_rules! server_setup {
     ($p:literal, $n:literal, $f:ident) => {{
         let (ready_send, ready_receive) = tokio::sync::oneshot::channel();
+        let (shutdown_send, shutdown_receive) =
+                tokio::sync::broadcast::channel::<()>(1);
 
-        let handle = tokio::spawn(async {
+        let handle = tokio::spawn(async move {
             let server_addr = format!("127.0.0.1:{}", $p);
             let listener = tokio::net::TcpListener::bind(server_addr).await
                     .expect("failed to create listener");
@@ -49,13 +52,14 @@ macro_rules! server_setup {
                 let stream = tokio_tungstenite::accept_async(maybe_tls)
                         .await.expect("failed to handshake");
                 
-                $f(stream, client_index).await.expect("server function failed");
+                $f(stream, client_index, shutdown_receive.resubscribe()).await
+                        .expect("server function failed");
             }
         });
 
         ready_receive.await.expect("server is not ready");
 
-        handle
+        (handle, shutdown_send)
     }};
 }
 

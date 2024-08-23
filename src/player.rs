@@ -839,7 +839,7 @@ fn websocket_error_to_close_code(e: WebSocketError) -> Option<CloseCode> {
 mod tests {
     use super::*;
 
-    async fn send_close_server(stream: PlayerStream, index: u16) -> Result<(), ()> {
+    async fn send_close_server(stream: PlayerStream, index: u16, _shutdown: broadcast::Receiver<()>) -> Result<(), ()> {
         let close_code = CloseCode::Library(4000 + index);
 
         super::send_close(SendCloseContext {
@@ -853,7 +853,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_close() {
-        let handle = crate::server_setup!(10000, 1, send_close_server);
+        let (handle, _) = crate::server_setup!(10000, 1, send_close_server);
 
         let mut stream = crate::client_setup!(10000);
 
@@ -872,7 +872,7 @@ mod tests {
         handle.await.expect("server was aborted");
     }
 
-    async fn player_joining_server(stream: PlayerStream, index: u16) -> Result<(), ()> {
+    async fn player_joining_server(stream: PlayerStream, index: u16, _shutdown: broadcast::Receiver<()>) -> Result<(), ()> {
         let (request_send, mut request_receive) = tokio::sync::mpsc::channel(1);
 
         let mut task = PlayerJoining::spawn(PlayerJoiningContext {
@@ -923,7 +923,7 @@ mod tests {
 
     #[tokio::test]
     async fn player_joining() {
-        let handle = crate::server_setup!(10001, 19, player_joining_server);
+        let (handle, _) = crate::server_setup!(10001, 19, player_joining_server);
 
         // Don't send a request - server should time us out.
         let mut stream = crate::client_setup!(10001);
