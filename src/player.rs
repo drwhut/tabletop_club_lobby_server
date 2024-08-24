@@ -464,133 +464,133 @@ impl PlayerInRoom {
 
         // Create dedicated [`Duration`] structures for time limits.
         let ping_interval_duration = Duration::from_secs(ping_interval_secs);
-        let mut response_time_limit = Duration::from_secs(response_time_limit_secs);
+        let response_time_limit = Duration::from_secs(response_time_limit_secs);
 
         // We need to send a ping every so often, so that we know whether the
         // connection is still alive or not. The interval depends on the server
         // configuration, which can change during run-time.
         let mut ping_interval = interval(ping_interval_duration);
 
-        // A flag to let us know if we are expecting a pong from the client.
-        // The client should only send us one after we have sent a ping.
-        let mut expecting_pong = false;
+        // Start an interval which emits a tick when the client has not sent a
+        // pong message in time, and reset it when they do send one.
+        let mut timeout_interval = interval(response_time_limit);
+        timeout_interval.tick().await; // Ignore first initial tick.
+
+        // Each time we send a ping to the client, we expect a pong message
+        // back - but we don't expect the client to send more pongs than we have
+        // sent them pings.
+        let mut num_expected_pongs: usize = 0;
 
         info!("setup complete");
 
         loop {
             tokio::select! {
-                res = timeout(response_time_limit, context.client_stream.next()) => match res {
-                    Ok(res) => match res {
-                        Some(res) => match res {
-                            Ok(msg) => match msg {
-                                Message::Text(text) => match parse_player_request(&text) {
-                                    Ok(req) => match req {
-                                        PlayerRequest::Seal => {
-                                            send_req!(context,
-                                                    RoomCommand::SealRoom);
-                                        },
-                                        PlayerRequest::Offer(target_id, payload) => {
-                                            send_req!(context,
-                                                    RoomCommand::SendOffer(
-                                                        target_id,
-                                                        payload
-                                                    ));
-                                        },
-                                        PlayerRequest::Answer(target_id, payload) => {
-                                            send_req!(context,
-                                                RoomCommand::SendAnswer(
-                                                    target_id,
-                                                    payload
-                                                ));
-                                        },
-                                        PlayerRequest::Candidate(target_id, payload) => {
-                                            send_req!(context,
-                                                RoomCommand::SendCandidate(
-                                                    target_id,
-                                                    payload
-                                                ));
-                                        },
+                res = context.client_stream.next() => match res {
+                    Some(res) => match res {
+                        Ok(msg) => match msg {
+                            Message::Text(text) => match parse_player_request(&text) {
+                                Ok(req) => match req {
+                                    PlayerRequest::Seal => {
+                                        send_req!(context, RoomCommand::SealRoom);
+                                    },
+                                    PlayerRequest::Offer(target_id, payload) => {
+                                        send_req!(context, RoomCommand::SendOffer(
+                                            target_id,
+                                            payload
+                                        ));
+                                    },
+                                    PlayerRequest::Answer(target_id, payload) => {
+                                        send_req!(context, RoomCommand::SendAnswer(
+                                            target_id,
+                                            payload
+                                        ));
+                                    },
+                                    PlayerRequest::Candidate(target_id, payload) => {
+                                        send_req!(context, RoomCommand::SendCandidate(
+                                            target_id,
+                                            payload
+                                        ));
+                                    },
 
-                                        _ => {
-                                            error!(request = %req, "client sent request while in a room");
-                                            close_connection!(context,
-                                                    CustomCloseCode::AlreadyInRoom.into());
-                                            break;
-                                        }
-                                    },
-                                    Err(e) => {
-                                        error!(error = %e, "error parsing request from client");
-                                        let close_code = parse_error_to_close_code(e);
-                                        close_connection!(context, close_code);
-                                        break;
-                                    },
-                                },
-                                Message::Binary(_) => {
-                                    error!("received binary message from client");
-                                    close_connection!(context, CloseCode::Unsupported);
-                                    break;
-                                },
-                                Message::Ping(_) => {
-                                    // Only the server is allowed to send ping
-                                    // messages.
-                                    error!("received unexpected ping from client");
-                                    close_connection!(context, CloseCode::Protocol);
-                                    break;
-                                },
-                                Message::Pong(_) => {
-                                    if expecting_pong {
-                                        trace!("received pong from client");
-                                        expecting_pong = false;
-                                    } else {
-                                        error!("received unexpected pong from client");
-                                        close_connection!(context, CloseCode::Protocol);
+                                    _ => {
+                                        error!(request = %req, "client sent request while in a room");
+                                        close_connection!(context,
+                                                CustomCloseCode::AlreadyInRoom.into());
                                         break;
                                     }
                                 },
-                                Message::Close(maybe_close_frame) => {
-                                    if let Some(close_frame) = maybe_close_frame {
-                                        if close_frame.code == CloseCode::Normal {
-                                            info!("client is closing connection");
-                                        } else {
-                                            warn!(code = %close_frame, "client sent close message");
-                                        }
-                                    } else {
-                                        warn!("client sent close message");
-                                    }
-
-                                    // The library should have automatically
-                                    // sent an echo frame back for us.
-                                    drop_connection!(context);
-                                    break;
-                                },
-                                Message::Frame(_) => {
-                                    // Should never receive a raw frame!
-                                    error!("received raw frame from stream");
-                                    drop_connection!(context);
+                                Err(e) => {
+                                    error!(error = %e, "error parsing request from client");
+                                    let close_code = parse_error_to_close_code(e);
+                                    close_connection!(context, close_code);
                                     break;
                                 },
                             },
-                            Err(e) => {
-                                error!(error = %e, "error receiving message from client");
-                                let maybe_close_code = websocket_error_to_close_code(e);
+                            Message::Binary(_) => {
+                                error!("received binary message from client");
+                                close_connection!(context, CloseCode::Unsupported);
+                                break;
+                            },
+                            Message::Ping(_) => {
+                                // Only the server is allowed to send ping
+                                // messages.
+                                error!("received unexpected ping from client");
+                                close_connection!(context, CloseCode::Protocol);
+                                break;
+                            },
+                            Message::Pong(_) => {
+                                if num_expected_pongs > 0 {
+                                    trace!("received pong from client");
+                                    num_expected_pongs -= 1;
 
-                                if let Some(close_code) = maybe_close_code {
-                                    close_connection!(context, close_code);
+                                    // Reset the timeout timer, and ignore the
+                                    // first initial tick.
+                                    timeout_interval.reset_immediately();
+                                    timeout_interval.tick().await;
                                 } else {
-                                    drop_connection!(context);
+                                    error!("received unexpected pong from client");
+                                    close_connection!(context, CloseCode::Protocol);
+                                    break;
+                                }
+                            },
+                            Message::Close(maybe_close_frame) => {
+                                if let Some(close_frame) = maybe_close_frame {
+                                    if close_frame.code == CloseCode::Normal {
+                                        info!("client is closing connection");
+                                    } else {
+                                        warn!(code = %close_frame, "client sent close message");
+                                    }
+                                } else {
+                                    warn!("client sent close message");
                                 }
 
+                                // The library should have automatically
+                                // sent an echo frame back for us.
+                                drop_connection!(context);
                                 break;
-                            }
+                            },
+                            Message::Frame(_) => {
+                                // Should never receive a raw frame!
+                                error!("received raw frame from stream");
+                                drop_connection!(context);
+                                break;
+                            },
                         },
-                        None => {
-                            error!("client stream ended early");
-                            drop_connection!(context);
+                        Err(e) => {
+                            error!(error = %e, "error receiving message from client");
+                            let maybe_close_code = websocket_error_to_close_code(e);
+
+                            if let Some(close_code) = maybe_close_code {
+                                close_connection!(context, close_code);
+                            } else {
+                                drop_connection!(context);
+                            }
+
                             break;
                         }
                     },
-                    Err(_) => {
-                        warn!("connection timed out, dropping client");
+                    None => {
+                        error!("client stream ended early");
                         drop_connection!(context);
                         break;
                     }
@@ -656,11 +656,17 @@ impl PlayerInRoom {
                 _ = ping_interval.tick() => {
                     trace!("sending ping");
                     send_msg!(context, Message::Ping(vec![]), "failed to send ping");
-                    expecting_pong = true;
+                    num_expected_pongs += 1;
+                },
+
+                _ = timeout_interval.tick() => {
+                    warn!("connection timed out with client");
+                    drop_connection!(context);
+                    break;
                 },
 
                 Ok(()) = context.config_receiver.changed() => {
-                    let new_config = context.config_receiver.borrow_and_update();
+                    let new_config = *context.config_receiver.borrow_and_update();
 
                     let ping_interval_secs = new_config.ping_interval_secs;
                     let response_time_limit_secs = new_config.response_time_limit_secs;
@@ -672,10 +678,16 @@ impl PlayerInRoom {
 
                     // Update the [`Duration`]s for timings.
                     let ping_interval_duration = Duration::from_secs(ping_interval_secs);
-                    response_time_limit = Duration::from_secs(response_time_limit_secs);
+                    let response_time_limit = Duration::from_secs(response_time_limit_secs);
 
-                    // Update the interval future with the new duration.
+                    // Update the interval futures with the new durations.
                     ping_interval = interval(ping_interval_duration);
+                    timeout_interval = interval(response_time_limit);
+
+                    // Ignore first tick of `timeout_interval`, so as to not
+                    // time out the client immediately after. However, a ping
+                    // will be sent to the client immediately afterwards.
+                    timeout_interval.tick().await;
                 },
 
                 // If we get the shutdown signal from the main thread, let the
@@ -838,6 +850,8 @@ fn websocket_error_to_close_code(e: WebSocketError) -> Option<CloseCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use tokio::time::sleep;
 
     async fn send_close_server(stream: PlayerStream, index: u16, _shutdown: broadcast::Receiver<()>) -> Result<(), ()> {
         let close_code = CloseCode::Library(4000 + index);
@@ -1021,6 +1035,259 @@ mod tests {
         let mut stream = crate::client_setup!(10001);
         stream.send(Message::Text("J: GGEZ\n".into())).await.expect("failed to send message");
         stream.next().await.unwrap().expect_err("expected connection drop");
+
+        handle.await.expect("server was aborted");
+    }
+
+    async fn player_in_room_server(stream: PlayerStream, index: u32, shutdown: broadcast::Receiver<()>) -> Result<(), mpsc::error::SendError<RoomNotification>> {
+        let room_code_int = (65 << 24) | (65 << 16) | (65 << 8) | (65 + index);
+        let room_code: RoomCode = room_code_int.try_into().unwrap();
+
+        let player_id = match index {
+            2 => 1024,
+            3 => 6732,
+            4 => 7,
+            _ => 1,
+        };
+        let other_ids = match index {
+            2 => vec!(1),
+            3 => vec!(1, 4261),
+            4 => vec!(6, 5, 4, 3, 2, 1),
+            _ => vec!(),
+        };
+
+        let (room_request_sender, mut room_request_receiver) = mpsc::channel(1);
+        let (room_close_sender, mut room_close_receiver) = mpsc::channel(1);
+        let (room_notification_sender, room_notification_receiver) =
+                mpsc::channel(1);
+        
+        let mut config = VariableConfig::default();
+        config.ping_interval_secs = 2;
+        config.response_time_limit_secs = 5;
+
+        let (config_sender, config_receiver) = watch::channel(config);
+
+        let mut task = PlayerInRoom::spawn(PlayerInRoomContext {
+            client_stream: stream,
+            room_code,
+            player_id,
+            other_ids,
+            room_request_sender,
+            room_close_sender,
+            room_notification_receiver,
+            config_receiver,
+            shutdown_signal: shutdown,
+        });
+
+        match index {
+            0 => {
+                // Send notifications at specific times to make sure that the
+                // correct number of pings are being sent inbetween messages.
+                sleep(Duration::from_millis(500)).await;
+                let noti = RoomNotification::PlayerJoined(500);
+                room_notification_sender.send(noti).await?;
+
+                sleep(Duration::from_secs(5)).await;
+                let noti = RoomNotification::PlayerJoined(5);
+                room_notification_sender.send(noti).await?;
+
+                sleep(Duration::from_secs(4)).await;
+                let noti = RoomNotification::PlayerJoined(9);
+                room_notification_sender.send(noti).await?;
+            }
+            1 => {
+                // Wait a bit for the initial ping to be sent, then update the
+                // config so that another ping gets sent at 0.5s. We also want
+                // to send messages so the client can check how many pings got
+                // through.
+                sleep(Duration::from_millis(250)).await;
+                let noti = RoomNotification::PlayerJoined(250);
+                room_notification_sender.send(noti).await?;
+
+                sleep(Duration::from_millis(250)).await;
+                config.ping_interval_secs = 1;
+                config.response_time_limit_secs = 8;
+                config_sender.send(config).expect("failed to send config");
+
+                sleep(Duration::from_millis(6250)).await;
+                let noti = RoomNotification::PlayerJoined(6750);
+                room_notification_sender.send(noti).await?;
+            },
+            _ => {}
+        }
+
+        // Should we have gotten a request from the player task at the end?
+        let maybe_expected_req = match index {
+            0 => Some(RoomRequest {
+                player_id: 1,
+                command: RoomCommand::DropConnection
+            }),
+            1 => Some(RoomRequest {
+                player_id: 1,
+                command: RoomCommand::DropConnection
+            }),
+            _ => None
+        };
+
+        if let Some(expected_req) = maybe_expected_req {
+            let req = room_request_receiver.recv().await.unwrap();
+            assert_eq!(req, expected_req);
+        };
+
+        // Should we have gotten a close request from the task at the end?
+        let maybe_expected_close = match index {
+            2 => Some((1024, CloseCode::Protocol)),
+            4 => Some((7, CloseCode::Protocol)),
+            _ => None
+        };
+
+        if let Some(expected_close) = maybe_expected_close {
+            let close = room_close_receiver.recv().await.unwrap();
+            assert_eq!(close.0, expected_close.0);
+            // There is no way to check the stream was the same from here:
+            // This will be checked in integration tests.
+            assert_eq!(close.2, expected_close.1);
+        }
+
+        task.handle().await.expect("task was aborted");
+        
+        Ok(())
+    }
+
+    macro_rules! assert_msg {
+        ($s:ident, $m:literal) => {
+            let res = $s.next().await.expect("stream ended early");
+            let msg = res.expect("error receiving message from server");
+            assert_eq!(msg, Message::Text(String::from($m)));
+        }
+    }
+
+    macro_rules! assert_ping {
+        ($s:ident) => {
+            let res = $s.next().await.expect("stream ended early");
+            let msg = res.expect("error receiving message from server");
+            assert_eq!(msg, Message::Ping(vec!()));
+        }
+    }
+
+    macro_rules! assert_end {
+        ($s:ident) => {
+            $s.next().await.unwrap().expect_err("expected connection to be dropped");
+        }
+    }
+
+    #[tokio::test]
+    async fn player_in_room() {
+        let (handle, shutdown_send) = crate::server_setup!(10002, 5,
+                player_in_room_server);
+        
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAA\n");
+        assert_ping!(stream); // 0s
+        assert_msg!(stream, "N: 500\n"); // 0.5s
+
+        // Check that the correct number of pings are sent to the client.
+        sleep(Duration::from_secs(4)).await;
+        assert_ping!(stream); // 2s
+        assert_ping!(stream); // 4s
+        assert_msg!(stream, "N: 5\n"); // 5s
+
+        // Check that the automatic pongs have reset the timeout timer.
+        sleep(Duration::from_secs(4)).await;
+        assert_ping!(stream); // 6s
+        assert_ping!(stream); // 8s
+        assert_msg!(stream, "N: 9\n"); // 9s
+
+        // Check that the timeout timer works.
+        sleep(Duration::from_secs(6)).await;
+        // NOTE: Unfortunately, the library flushing pings from the server is
+        // not consistent. That, plus the fact that the select! macro selects
+        // branches at random, means that the number of pings we will receive
+        // here is not deterministic. We've already shown that the server sends
+        // pings at the correct rate, so just wait until we get an error in
+        // the stream representing that the connection has closed.
+        loop {
+            if let Err(_) = stream.next().await.unwrap() {
+                break;
+            }
+        }
+
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAB\n");
+        assert_ping!(stream); // 0s
+
+        // Test if the server config update works as expected. It should change
+        // the rate of ping messages, as well as reset the timeout timer.
+        // NOTE: This also tests that the server allows pongs to be sent in
+        // batches, as long as the number of them is not excessive.
+        sleep(Duration::from_secs(7)).await;
+        assert_msg!(stream, "N: 250\n"); // 0.25s
+        assert_ping!(stream); // 0.5s
+        assert_ping!(stream); // 1.5s
+        assert_ping!(stream); // 2.5s
+        assert_ping!(stream); // 3.5s
+        assert_ping!(stream); // 4.5s
+        assert_ping!(stream); // 5.5s
+        assert_ping!(stream); // 6.5s
+        assert_msg!(stream, "N: 6750\n"); // 6.75s
+
+        // Check that the new timeout works.
+        sleep(Duration::from_secs(9)).await;
+        loop { // Same issue as above.
+            if let Err(_) = stream.next().await.unwrap() {
+                break;
+            }
+        }
+
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1024\n");
+        assert_msg!(stream, "N: 1\n");
+        assert_msg!(stream, "J: AAAC\n");
+        assert_ping!(stream);
+
+        // Test that sending one too many pongs closes the connection.
+        stream.send(Message::Pong(vec!())).await.expect("failed to send pong");
+        stream.send(Message::Pong(vec!())).await.expect("failed to send pong");
+        assert_end!(stream);
+
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 6732\n");
+        assert_msg!(stream, "N: 1\n");
+        assert_msg!(stream, "N: 4261\n");
+        assert_msg!(stream, "J: AAAD\n");
+        assert_ping!(stream);
+
+        // Test that sending the shutdown signal closes the connection.
+        // NOTE: No requests should be made to the room from this.
+        shutdown_send.send(()).expect("failed to send shutdown signal");
+        assert_end!(stream);
+
+        {
+            let mut stream = crate::client_setup!(10002);
+            assert_msg!(stream, "I: 7\n");
+            assert_msg!(stream, "N: 6\n");
+            assert_msg!(stream, "N: 5\n");
+            assert_msg!(stream, "N: 4\n");
+            assert_msg!(stream, "N: 3\n");
+            assert_msg!(stream, "N: 2\n");
+            assert_msg!(stream, "N: 1\n");
+            assert_msg!(stream, "J: AAAE\n");
+            assert_ping!(stream);
+        }
+
+        // test each room notification
+        // (check INT_MAX for PlayerID, payload sizes)
+        // TODO: Check incoming payload sizes, they may BECOME too big when the
+        // destination ID changes.
+
+        // test erroneous messages
+        // test binary messages
+        // test close messages
+        // test erroneous requests
+        // test requests meant for lobby
+        // test valid requests
 
         handle.await.expect("server was aborted");
     }

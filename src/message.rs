@@ -58,7 +58,7 @@ impl fmt::Display for LobbyCommand {
 }
 
 /// A request from a client (with the given `handle_id`) to the lobby.
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct LobbyRequest {
     pub handle_id: u32,
     pub command: LobbyCommand,
@@ -108,7 +108,7 @@ impl fmt::Display for RoomCommand {
 
 /// A request from a player (with the given `player_id`) to the room the player
 /// has joined.
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct RoomRequest {
     pub player_id: u32,
     pub command: RoomCommand,
