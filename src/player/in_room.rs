@@ -696,6 +696,23 @@ mod tests {
         Ok(())
     }
 
+    macro_rules! send_msg {
+        ($s:ident, $m:expr) => {
+            $s.send($m).await.expect("failed to send");
+        };
+    }
+
+    macro_rules! send_close {
+        ($s:ident, $c:expr) => {
+            $s.close(Some(CloseFrame {
+                code: $c,
+                reason: "".into(),
+            }))
+            .await
+            .expect("failed to send close");
+        };
+    }
+
     macro_rules! assert_msg {
         ($s:ident, $m:expr) => {
             let res = $s.next().await.expect("stream ended early");
@@ -793,14 +810,8 @@ mod tests {
         assert_ping!(stream);
 
         // Test that sending one too many pongs closes the connection.
-        stream
-            .send(Message::Pong(vec![]))
-            .await
-            .expect("failed to send pong");
-        stream
-            .send(Message::Pong(vec![]))
-            .await
-            .expect("failed to send pong");
+        send_msg!(stream, Message::Pong(vec![]));
+        send_msg!(stream, Message::Pong(vec![]));
         assert_end!(stream);
 
         let mut stream = crate::client_setup!(10002);
@@ -879,10 +890,7 @@ mod tests {
         assert_msg!(stream, "J: AAAJ\n");
         assert_ping!(stream);
         let invalid_utf8 = unsafe { String::from_utf8_unchecked(vec![56, 123, 213, 85, 7]) };
-        stream
-            .send(Message::Text(invalid_utf8))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Text(invalid_utf8));
         assert_end!(stream);
 
         // Test sending a binary message.
@@ -890,10 +898,7 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAK\n");
         assert_ping!(stream);
-        stream
-            .send(Message::Binary(vec![0, 1, 2]))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Binary(vec![0, 1, 2]));
         assert_end!(stream);
 
         // Test sending close messages.
@@ -901,26 +906,14 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAL\n");
         assert_ping!(stream);
-        stream
-            .close(Some(CloseFrame {
-                code: CloseCode::Normal,
-                reason: "".into(),
-            }))
-            .await
-            .expect("failed to send close");
+        send_close!(stream, CloseCode::Normal);
         assert_end!(stream);
 
         let mut stream = crate::client_setup!(10002);
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAM\n");
         assert_ping!(stream);
-        stream
-            .close(Some(CloseFrame {
-                code: CloseCode::Error,
-                reason: "".into(),
-            }))
-            .await
-            .expect("failed to send close");
+        send_close!(stream, CloseCode::Error);
         assert_end!(stream);
 
         // Test sending a message that doesn't have a newline in it.
@@ -928,10 +921,7 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAN\n");
         assert_ping!(stream);
-        stream
-            .send(Message::Text("O: 1yo!".into()))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Text("O: 1yo!".into()));
         assert_end!(stream);
 
         // Test sending a message without a space in it.
@@ -939,10 +929,7 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAO\n");
         assert_ping!(stream);
-        stream
-            .send(Message::Text("S:\n".into()))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Text("S:\n".into()));
         assert_end!(stream);
 
         // Test sending a message with an invalid command.
@@ -950,10 +937,7 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAP\n");
         assert_ping!(stream);
-        stream
-            .send(Message::Text("X: 2\nwhy".into()))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Text("X: 2\nwhy".into()));
         assert_end!(stream);
 
         // Test sending a message with a PlayerID that is not an integer.
@@ -961,10 +945,7 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAQ\n");
         assert_ping!(stream);
-        stream
-            .send(Message::Text("A: dave\nhi!".into()))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Text("A: dave\nhi!".into()));
         assert_end!(stream);
 
         // Test sending a message with a PlayerID that is blank.
@@ -972,10 +953,7 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAR\n");
         assert_ping!(stream);
-        stream
-            .send(Message::Text("O: \nwhut".into()))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Text("O: \nwhut".into()));
         assert_end!(stream);
 
         // Test sending a message with a PlayerID that is negative.
@@ -983,10 +961,7 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAS\n");
         assert_ping!(stream);
-        stream
-            .send(Message::Text("C: -7\nuh oh".into()))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Text("C: -7\nuh oh".into()));
         assert_end!(stream);
 
         // Test sending a message with a PlayerID that is too big.
@@ -994,10 +969,7 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAT\n");
         assert_ping!(stream);
-        stream
-            .send(Message::Text("O: 4294967296\n>u32".into()))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Text("O: 4294967296\n>u32".into()));
         assert_end!(stream);
 
         // Test sending a seal request with a payload.
@@ -1005,10 +977,7 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAU\n");
         assert_ping!(stream);
-        stream
-            .send(Message::Text("S: \npayload!".into()))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Text("S: \npayload!".into()));
         assert_end!(stream);
 
         // Test sending a WebRTC message without a payload.
@@ -1016,10 +985,7 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAV\n");
         assert_ping!(stream);
-        stream
-            .send(Message::Text("C: 20\n".into()))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Text("C: 20\n".into()));
         assert_end!(stream);
 
         // Test sending a WebRTC message with a payload that is slightly too big.
@@ -1039,10 +1005,7 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAX\n");
         assert_ping!(stream);
-        stream
-            .send(Message::Text("J: \n".into()))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Text("J: \n".into()));
         assert_end!(stream);
 
         // Test joining a room while already in a room.
@@ -1050,10 +1013,7 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAY\n");
         assert_ping!(stream);
-        stream
-            .send(Message::Text("J: BEAN\n".into()))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Text("J: BEAN\n".into()));
         assert_end!(stream);
 
         // Test valid requests.
@@ -1061,23 +1021,12 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAZ\n");
         assert_ping!(stream);
-        stream
-            .send(Message::Text("S: \n".into()))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Text("S: \n".into()));
         // NOTE: 0 is an invalid PlayerID, but the room checks this.
-        stream
-            .send(Message::Text("O: 0\n\\o/".into()))
-            .await
-            .expect("failed to send");
-        stream
-            .send(Message::Text("A: 4294967295\nboi".into()))
-            .await
-            .expect("failed to send");
-        stream
-            .send(Message::Text("C: 1\ndone!".into()))
-            .await
-            .expect("failed to send");
+        send_msg!(stream, Message::Text("O: 0\n\\o/".into()));
+        send_msg!(stream, Message::Text("A: 4294967295\nboi".into()));
+        send_msg!(stream, Message::Text("C: 1\ndone!".into()));
+        // Close frames without codes should also work.
         stream
             .close(None)
             .await

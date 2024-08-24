@@ -229,17 +229,39 @@ mod tests {
         Ok(())
     }
 
+    macro_rules! send_msg {
+        ($s:ident, $m:expr) => {
+            $s.send($m).await.expect("failed to send");
+        };
+    }
+
+    macro_rules! send_close {
+        ($s:ident, $c:expr) => {
+            $s.close(Some(CloseFrame {
+                code: $c,
+                reason: "".into(),
+            }))
+            .await
+            .expect("failed to send close");
+        };
+    }
+
+    macro_rules! assert_end {
+        ($s:ident) => {
+            $s.next()
+                .await
+                .unwrap()
+                .expect_err("expected connection drop");
+        };
+    }
+
     #[tokio::test]
     async fn player_joining() {
         let (handle, _) = crate::server_setup!(10001, 19, player_joining_server);
 
         // Don't send a request - server should time us out.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        assert_end!(stream);
 
         // Drop the connection as soon as we can.
         {
@@ -249,205 +271,87 @@ mod tests {
         // Send an invalid UTF-8 string.
         let mut stream = crate::client_setup!(10001);
         let invalid_utf8 = unsafe { String::from_utf8_unchecked(vec![103, 231, 46, 254]) };
-        stream
-            .send(Message::Text(invalid_utf8))
-            .await
-            .expect("failed to send");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Text(invalid_utf8));
+        assert_end!(stream);
 
         // Send a close code.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .close(Some(CloseFrame {
-                code: CloseCode::Normal,
-                reason: "".into(),
-            }))
-            .await
-            .expect("failed to close stream");
+        send_close!(stream, CloseCode::Normal);
         // TODO: Check if server echoed the close code, see above for why we
         // can't check this yet.
 
         // Send a ping.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Ping(vec![]))
-            .await
-            .expect("failed to send ping");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Ping(vec![]));
+        assert_end!(stream);
 
         // Send a pong.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Pong(vec![]))
-            .await
-            .expect("failed to send pong");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Pong(vec![]));
+        assert_end!(stream);
 
         // Send a binary message.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Binary(vec![0, 1]))
-            .await
-            .expect("failed to send binary");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Binary(vec![0, 1]));
+        assert_end!(stream);
 
         // Send a request without a newline.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Text("J: ".into()))
-            .await
-            .expect("failed to send message");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Text("J: ".into()));
+        assert_end!(stream);
 
         // Send a request without a space.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Text("J:\n".into()))
-            .await
-            .expect("failed to send message");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Text("J:\n".into()));
+        assert_end!(stream);
 
         // Send a request with an unexpected payload.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Text("J: \nHey!".into()))
-            .await
-            .expect("failed to send message");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Text("J: \nHey!".into()));
+        assert_end!(stream);
 
         // Send a request with an invalid command.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Text("B: \n".into()))
-            .await
-            .expect("failed to send message");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Text("B: \n".into()));
+        assert_end!(stream);
 
         // Send a request with a room code that is the wrong length.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Text("J: ABCDEF\n".into()))
-            .await
-            .expect("failed to send message");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Text("J: ABCDEF\n".into()));
+        assert_end!(stream);
 
         // Send a request with a room code that has invalid characters.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Text("J: abcd\n".into()))
-            .await
-            .expect("failed to send message");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Text("J: abcd\n".into()));
+        assert_end!(stream);
 
         // Try sealing a room before we have joined one.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Text("S: \n".into()))
-            .await
-            .expect("failed to send message");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Text("S: \n".into()));
+        assert_end!(stream);
 
         // Try sending messages to other players before joining a room.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Text("O: 1\noffer".into()))
-            .await
-            .expect("failed to send message");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Text("O: 1\noffer".into()));
+        assert_end!(stream);
 
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Text("A: 1\nanswer".into()))
-            .await
-            .expect("failed to send message");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Text("A: 1\nanswer".into()));
+        assert_end!(stream);
 
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Text("C: 1\ncandidate".into()))
-            .await
-            .expect("failed to send message");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Text("C: 1\ncandidate".into()));
+        assert_end!(stream);
 
         // Send a request to host a room.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Text("J: \n".into()))
-            .await
-            .expect("failed to send message");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Text("J: \n".into()));
+        assert_end!(stream);
 
         // Send a request to join a room.
         let mut stream = crate::client_setup!(10001);
-        stream
-            .send(Message::Text("J: GGEZ\n".into()))
-            .await
-            .expect("failed to send message");
-        stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("expected connection drop");
+        send_msg!(stream, Message::Text("J: GGEZ\n".into()));
+        assert_end!(stream);
 
         handle.await.expect("server was aborted");
     }
