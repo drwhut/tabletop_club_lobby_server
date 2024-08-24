@@ -24,36 +24,40 @@ SOFTWARE.
 //! Helper macros used for unit tests throughout the server.
 
 /// Set up the server task with the following parameters:
-/// 
+///
 /// - The port number to bind to. **NOTE:** Make sure to use a different port
 ///   for each test, otherwise some tests may fail!
 /// - The number of connections to accept before the task stops.
 /// - The function to call after each connection is accepted.
-/// 
+///
 /// The handle for the spawned task is returned, along with a sender for the
 /// shutdown signal if the task needs it.
 #[macro_export]
 macro_rules! server_setup {
     ($p:literal, $n:literal, $f:ident) => {{
         let (ready_send, ready_receive) = tokio::sync::oneshot::channel();
-        let (shutdown_send, shutdown_receive) =
-                tokio::sync::broadcast::channel::<()>(1);
+        let (shutdown_send, shutdown_receive) = tokio::sync::broadcast::channel::<()>(1);
 
         let handle = tokio::spawn(async move {
             let server_addr = format!("127.0.0.1:{}", $p);
-            let listener = tokio::net::TcpListener::bind(server_addr).await
-                    .expect("failed to create listener");
+            let listener = tokio::net::TcpListener::bind(server_addr)
+                .await
+                .expect("failed to create listener");
             ready_send.send(()).expect("failed to send ready signal");
 
             for client_index in 0..$n {
-                let (conn, _) = listener.accept().await
-                        .expect("failed to accept connection");
+                let (conn, _) = listener
+                    .accept()
+                    .await
+                    .expect("failed to accept connection");
                 let maybe_tls = tokio_tungstenite::MaybeTlsStream::Plain(conn);
                 let stream = tokio_tungstenite::accept_async(maybe_tls)
-                        .await.expect("failed to handshake");
-                
-                $f(stream, client_index, shutdown_receive.resubscribe()).await
-                        .expect("server function failed");
+                    .await
+                    .expect("failed to handshake");
+
+                $f(stream, client_index, shutdown_receive.resubscribe())
+                    .await
+                    .expect("server function failed");
             }
         });
 
@@ -64,19 +68,21 @@ macro_rules! server_setup {
 }
 
 /// Set up the client connection to the test server with the given port.
-/// 
+///
 /// The WebSocket stream is then returned for use in the tests.
 #[macro_export]
 macro_rules! client_setup {
     ($p:literal) => {{
         let server_addr = format!("127.0.0.1:{}", $p);
-        let tcp = tokio::net::TcpStream::connect(server_addr.clone()).await
-                .expect("failed to connect");
+        let tcp = tokio::net::TcpStream::connect(server_addr.clone())
+            .await
+            .expect("failed to connect");
         let maybe_tls = tokio_tungstenite::MaybeTlsStream::Plain(tcp);
-        let (stream, _) = tokio_tungstenite::client_async(
-                format!("ws://{}", server_addr), maybe_tls).await
+        let (stream, _) =
+            tokio_tungstenite::client_async(format!("ws://{}", server_addr), maybe_tls)
+                .await
                 .expect("client failed to connect");
-        
+
         stream
     }};
 }

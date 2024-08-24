@@ -60,7 +60,10 @@ pub enum ClientUniqueID {
     IsJoining(HandleID),
 
     /// The [`RoomCode`] and [`PlayerID`] of the player if they are in a room.
-    HasJoined{ room_code: RoomCode, player_id: PlayerID },
+    HasJoined {
+        room_code: RoomCode,
+        player_id: PlayerID,
+    },
 }
 
 impl fmt::Display for ClientUniqueID {
@@ -68,7 +71,10 @@ impl fmt::Display for ClientUniqueID {
         match self {
             // TODO: See how this format looks in the logs.
             Self::IsJoining(handle_id) => write!(f, "handle_id={}", handle_id),
-            Self::HasJoined{ room_code, player_id } => write!(f, "room_code={} player_id={}", room_code, player_id),
+            Self::HasJoined {
+                room_code,
+                player_id,
+            } => write!(f, "room_code={} player_id={}", room_code, player_id),
         }
     }
 }
@@ -88,22 +94,22 @@ pub struct SendCloseContext {
 
 /// A task which sends a close code to a given player, and then waits for the
 /// client to echo it back, up to a given amount of time.
-/// 
+///
 /// This task should be used whenever the server wants to initialise the process
 /// of closing the connection with a client. If however the client is the one to
 /// initialise it, then the library will automatically send an echo frame back,
 /// after which the connection should be dropped.
-/// 
+///
 /// Since this task can potentially take up to a few seconds to complete, it
 /// should be added to a task tracker so that connections are closed gracefully
 /// when the server is shutting down.
-#[tracing::instrument(name="send_close", skip_all, fields(client_id))]
+#[tracing::instrument(name = "send_close", skip_all, fields(client_id))]
 pub async fn send_close(mut context: SendCloseContext) {
     // Since the `client_id` is within an `Option`, we need to set the log's
     // span field separately.
     let client_id = match context.client_id {
         Some(unique_id) => unique_id.to_string(),
-        None => "none".to_string()
+        None => "none".to_string(),
     };
     tracing::Span::current().record("client_id", &client_id);
 
@@ -132,17 +138,17 @@ pub async fn send_close(mut context: SendCloseContext) {
                                 "received echo was not the expected value"
                             );
                         }
-                    },
+                    }
                     Err(_) => {} // Call should output error log.
                 },
                 Err(_) => {
                     warn!("did not receive echo in time, dropping connection");
                 }
             }
-        },
+        }
         Err(e) => {
             warn!(error = %e, "failed to send close code, dropping connection");
-        },
+        }
     }
 
     info!("connection closed");
@@ -164,7 +170,7 @@ async fn read_until_close_frame(stream: &mut PlayerStream) -> Result<CloseCode, 
                             warn!("received echo did not contain close frame, dropping connection");
                             return Err(());
                         }
-                    },
+                    }
 
                     // If the message is not a close frame, then we need
                     // to keep reading until we get one.
@@ -173,8 +179,8 @@ async fn read_until_close_frame(stream: &mut PlayerStream) -> Result<CloseCode, 
                 Err(e) => {
                     warn!(error = %e, "error receiving echo, dropping connection");
                     return Err(());
-                },
-            }
+                }
+            },
             None => {
                 error!("client stream ended early");
                 return Err(());
@@ -253,7 +259,7 @@ fn parse_player_request(msg: &str) -> Result<PlayerRequest, ParseError> {
                     } else {
                         Err(ParseError::InvalidArgument)
                     }
-                },
+                }
                 "S:" => {
                     if !payload.is_empty() {
                         return Err(ParseError::UnexpectedPayload);
@@ -264,7 +270,7 @@ fn parse_player_request(msg: &str) -> Result<PlayerRequest, ParseError> {
                     }
 
                     Ok(PlayerRequest::Seal)
-                },
+                }
                 "O:" => {
                     if let Ok(player_id) = argument.parse::<PlayerID>() {
                         if payload.is_empty() {
@@ -275,7 +281,7 @@ fn parse_player_request(msg: &str) -> Result<PlayerRequest, ParseError> {
                     } else {
                         Err(ParseError::InvalidArgument)
                     }
-                },
+                }
                 "A:" => {
                     if let Ok(player_id) = argument.parse::<PlayerID>() {
                         if payload.is_empty() {
@@ -286,7 +292,7 @@ fn parse_player_request(msg: &str) -> Result<PlayerRequest, ParseError> {
                     } else {
                         Err(ParseError::InvalidArgument)
                     }
-                },
+                }
                 "C:" => {
                     if let Ok(player_id) = argument.parse::<PlayerID>() {
                         if payload.is_empty() {
@@ -297,7 +303,7 @@ fn parse_player_request(msg: &str) -> Result<PlayerRequest, ParseError> {
                     } else {
                         Err(ParseError::InvalidArgument)
                     }
-                },
+                }
                 _ => Err(ParseError::InvalidCommand),
             }
         } else {
@@ -323,7 +329,7 @@ fn parse_error_to_close_code(e: ParseError) -> CloseCode {
 
 /// Potentially convert a WebSocket error into a [`CloseCode`] that can be sent
 /// back to the client, so that they know what went wrong.
-/// 
+///
 /// If `None` is returned, then the connection should just be dropped.
 fn websocket_error_to_close_code(e: WebSocketError) -> Option<CloseCode> {
     match e {
@@ -336,7 +342,7 @@ fn websocket_error_to_close_code(e: WebSocketError) -> Option<CloseCode> {
         WebSocketError::WriteBufferFull(_) => None, // Can't send close message.
         WebSocketError::Utf8 => Some(CloseCode::Invalid),
         WebSocketError::AttackAttempt => None, // If I can't see it, it's not there...
-        WebSocketError::Url(_) => None, // Can't send any message.
+        WebSocketError::Url(_) => None,        // Can't send any message.
         WebSocketError::Http(_) => Some(CloseCode::Protocol),
         WebSocketError::HttpFormat(_) => Some(CloseCode::Invalid),
     }
@@ -348,14 +354,19 @@ mod tests {
 
     use tokio::sync::broadcast;
 
-    async fn send_close_server(stream: PlayerStream, index: u16, _shutdown: broadcast::Receiver<()>) -> Result<(), ()> {
+    async fn send_close_server(
+        stream: PlayerStream,
+        index: u16,
+        _shutdown: broadcast::Receiver<()>,
+    ) -> Result<(), ()> {
         let close_code = CloseCode::Library(4000 + index);
 
         super::send_close(SendCloseContext {
             client_stream: stream,
             close_code,
-            client_id: None
-        }).await;
+            client_id: None,
+        })
+        .await;
 
         Ok(())
     }
@@ -372,12 +383,14 @@ mod tests {
         // See: https://github.com/snapview/tokio-tungstenite/issues/310
 
         // Receiving a close code from the server, but not sending an echo back.
-        assert_eq!(stream.next().await.unwrap().unwrap(),
-                Message::Close(Some(CloseFrame {
-                    code: CustomCloseCode::Error.into(),
-                    reason: "".into()
-                })));
-        
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            Message::Close(Some(CloseFrame {
+                code: CustomCloseCode::Error.into(),
+                reason: "".into()
+            }))
+        );
+
         handle.await.expect("server was aborted");
     }
 }

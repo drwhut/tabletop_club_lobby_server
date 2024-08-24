@@ -24,7 +24,7 @@ SOFTWARE.
 use std::fmt;
 
 /// A human-readable unique identifier for rooms within the lobby.
-/// 
+///
 /// The current format is four ASCII characters, from 'A' to 'Z'.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct RoomCode {
@@ -56,7 +56,7 @@ impl RoomCode {
     }
 
     /// Check if the current room code is valid.
-    /// 
+    ///
     /// **NOTE:** This function is for testing purposes only.
     #[cfg(test)]
     pub fn is_valid(&self) -> bool {
@@ -64,7 +64,7 @@ impl RoomCode {
     }
 
     /// Check if the room code is considered profanity.
-    /// 
+    ///
     /// This should be used to make sure that lobbies are not given lobby codes
     /// with profanity, as we don't want to traumatise the children.
     pub fn is_profanity(&self) -> bool {
@@ -230,9 +230,9 @@ mod tests {
                 for c3 in 65..91 {
                     for c4 in 65..91 {
                         let code_int = u32::from_be_bytes([c1, c2, c3, c4]);
-                        let room_code = RoomCode::try_from(code_int)
-                                .expect("room code considered invalid");
-                        
+                        let room_code =
+                            RoomCode::try_from(code_int).expect("room code considered invalid");
+
                         if room_code.is_profanity() {
                             profanity_count += 1;
                         }

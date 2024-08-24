@@ -25,7 +25,7 @@ use super::*;
 
 use crate::close_code::{CloseCode, CustomCloseCode};
 use crate::config::VariableConfig;
-use crate::message::{RoomCommand, RoomRequest, RoomNotification};
+use crate::message::{RoomCommand, RoomNotification, RoomRequest};
 use crate::room_code::RoomCode;
 
 use futures_util::sink::SinkExt;
@@ -48,7 +48,7 @@ pub struct PlayerInRoomContext {
     pub player_id: PlayerID,
 
     /// The IDs of the other players in the room at the time of joining.
-    /// 
+    ///
     /// **NOTE:** This list is only used once at the start of the instance. The
     /// "true" list of players is stored in the room itself.
     pub other_ids: Vec<PlayerID>,
@@ -72,11 +72,11 @@ pub struct PlayerInRoomContext {
 
 /// An instance which handles communication with a client after they have joined
 /// a room within the lobby.
-/// 
+///
 /// The instance first sends the client their [`PlayerID`], followed by the IDs
 /// of the other clients that are in the room. After that, the [`RoomCode`] is
 /// sent to the client, whether they hosted a room, or joined an existing one.
-/// 
+///
 /// Once the data has been sent, it is then up to the client whether they want
 /// to establish a peer-to-peer connection with the other players or not. As of
 /// Tabletop Club v0.2.0, the host of the room is the one that initiates the
@@ -168,17 +168,26 @@ impl PlayerInRoom {
     async fn task(mut context: PlayerInRoomContext) {
         trace!("sending room details to the player");
 
-        send_msg!(context, Message::Text(format!("I: {}\n", context.player_id)),
-                "failed to send player id to new player");
-        
+        send_msg!(
+            context,
+            Message::Text(format!("I: {}\n", context.player_id)),
+            "failed to send player id to new player"
+        );
+
         for other_id in context.other_ids {
-            send_msg!(context, Message::Text(format!("N: {}\n", other_id)),
-                    "failed to send other player id to new player");
+            send_msg!(
+                context,
+                Message::Text(format!("N: {}\n", other_id)),
+                "failed to send other player id to new player"
+            );
         }
 
-        send_msg!(context, Message::Text(format!("J: {}\n", context.room_code)),
-                "failed to send room code to new player");
-        
+        send_msg!(
+            context,
+            Message::Text(format!("J: {}\n", context.room_code)),
+            "failed to send room code to new player"
+        );
+
         // Read the server configuration as it currently stands - it may be
         // updated later.
         let starting_config = *context.config_receiver.borrow_and_update();
@@ -433,9 +442,12 @@ mod tests {
 
     use tokio::time::sleep;
 
-    async fn player_in_room_server(stream: PlayerStream, index: u32, shutdown: broadcast::Receiver<()>) -> Result<(), mpsc::error::SendError<RoomNotification>> {
-        let room_code_int = ((65 << 24) | (65 << 16) | (65 << 8) | (65 << 0))
-                + (index % 26);
+    async fn player_in_room_server(
+        stream: PlayerStream,
+        index: u32,
+        shutdown: broadcast::Receiver<()>,
+    ) -> Result<(), mpsc::error::SendError<RoomNotification>> {
+        let room_code_int = ((65 << 24) | (65 << 16) | (65 << 8) | (65 << 0)) + (index % 26);
         let room_code: RoomCode = room_code_int.try_into().unwrap();
 
         let player_id = match index {
@@ -446,18 +458,17 @@ mod tests {
             _ => 1,
         };
         let other_ids = match index {
-            2 => vec!(1),
-            3 => vec!(1, 4261),
-            4 => vec!(6, 5, 4, 3, 2, 1),
-            8 => vec!(1, 512),
-            _ => vec!(),
+            2 => vec![1],
+            3 => vec![1, 4261],
+            4 => vec![6, 5, 4, 3, 2, 1],
+            8 => vec![1, 512],
+            _ => vec![],
         };
 
         let (room_request_sender, mut room_request_receiver) = mpsc::channel(1);
         let (room_close_sender, mut room_close_receiver) = mpsc::channel(1);
-        let (room_notification_sender, room_notification_receiver) =
-                mpsc::channel(1);
-        
+        let (room_notification_sender, room_notification_receiver) = mpsc::channel(1);
+
         let mut config = VariableConfig::default();
         config.ping_interval_secs = 2;
         config.response_time_limit_secs = 5;
@@ -509,7 +520,7 @@ mod tests {
                 sleep(Duration::from_millis(6250)).await;
                 let noti = RoomNotification::PlayerJoined(6750);
                 room_notification_sender.send(noti).await?;
-            },
+            }
             5 => {
                 sleep(Duration::from_millis(500)).await;
 
@@ -541,12 +552,10 @@ mod tests {
                 let noti = RoomNotification::OfferReceived(200, "hello world!".into());
                 room_notification_sender.send(noti).await?;
 
-                let noti = RoomNotification::OfferReceived(std::u32::MAX,
-                        "max integer".into());
+                let noti = RoomNotification::OfferReceived(std::u32::MAX, "max integer".into());
                 room_notification_sender.send(noti).await?;
 
-                let noti = RoomNotification::AnswerReceived(1000,
-                        "lol\n2nd line!".into());
+                let noti = RoomNotification::AnswerReceived(1000, "lol\n2nd line!".into());
                 room_notification_sender.send(noti).await?;
 
                 // Send a message just under the payload limit of 16 MiB.
@@ -556,48 +565,64 @@ mod tests {
 
                 // If the host left, the task should stop and send back a close
                 // request.
-                room_notification_sender.send(RoomNotification::HostLeft).await?;
-            },
+                room_notification_sender
+                    .send(RoomNotification::HostLeft)
+                    .await?;
+            }
             6 => {
                 sleep(Duration::from_millis(500)).await;
-                room_notification_sender.send(RoomNotification::RoomSealed).await?;
-            },
+                room_notification_sender
+                    .send(RoomNotification::RoomSealed)
+                    .await?;
+            }
             7 => {
                 sleep(Duration::from_millis(500)).await;
                 let noti = RoomNotification::Error(CloseCode::Abnormal);
                 room_notification_sender.send(noti).await?;
-            },
+            }
             8 => {
                 sleep(Duration::from_millis(500)).await;
                 let noti = RoomNotification::Error(CustomCloseCode::InvalidCommand.into());
                 room_notification_sender.send(noti).await?;
-            },
+            }
             25 => {
                 // A series of valid requests should come through here.
                 let req = room_request_receiver.recv().await.unwrap();
-                assert_eq!(req, RoomRequest{
-                    player_id: 1,
-                    command: RoomCommand::SealRoom
-                });
+                assert_eq!(
+                    req,
+                    RoomRequest {
+                        player_id: 1,
+                        command: RoomCommand::SealRoom
+                    }
+                );
 
                 let req = room_request_receiver.recv().await.unwrap();
-                assert_eq!(req, RoomRequest{
-                    player_id: 1,
-                    command: RoomCommand::SendOffer(0, "\\o/".into())
-                });
+                assert_eq!(
+                    req,
+                    RoomRequest {
+                        player_id: 1,
+                        command: RoomCommand::SendOffer(0, "\\o/".into())
+                    }
+                );
 
                 let req = room_request_receiver.recv().await.unwrap();
-                assert_eq!(req, RoomRequest{
-                    player_id: 1,
-                    command: RoomCommand::SendAnswer(4294967295, "boi".into())
-                });
+                assert_eq!(
+                    req,
+                    RoomRequest {
+                        player_id: 1,
+                        command: RoomCommand::SendAnswer(4294967295, "boi".into())
+                    }
+                );
 
                 let req = room_request_receiver.recv().await.unwrap();
-                assert_eq!(req, RoomRequest{
-                    player_id: 1,
-                    command: RoomCommand::SendCandidate(1, "done!".into())
-                });
-            },
+                assert_eq!(
+                    req,
+                    RoomRequest {
+                        player_id: 1,
+                        command: RoomCommand::SendCandidate(1, "done!".into())
+                    }
+                );
+            }
             _ => {}
         }
 
@@ -605,25 +630,25 @@ mod tests {
         let maybe_expected_req = match index {
             0 => Some(RoomRequest {
                 player_id: 1,
-                command: RoomCommand::DropConnection
+                command: RoomCommand::DropConnection,
             }),
             1 => Some(RoomRequest {
                 player_id: 1,
-                command: RoomCommand::DropConnection
+                command: RoomCommand::DropConnection,
             }),
             11 => Some(RoomRequest {
                 player_id: 1,
-                command: RoomCommand::DropConnection
+                command: RoomCommand::DropConnection,
             }),
             12 => Some(RoomRequest {
                 player_id: 1,
-                command: RoomCommand::DropConnection
+                command: RoomCommand::DropConnection,
             }),
             25 => Some(RoomRequest {
                 player_id: 1,
-                command: RoomCommand::DropConnection
+                command: RoomCommand::DropConnection,
             }),
-            _ => None
+            _ => None,
         };
 
         assert_eq!(room_request_receiver.recv().await, maybe_expected_req);
@@ -650,24 +675,24 @@ mod tests {
             22 => Some((1, CloseCode::Size)),
             23 => Some((1, CustomCloseCode::AlreadyInRoom.into())),
             24 => Some((1, CustomCloseCode::AlreadyInRoom.into())),
-            _ => None
+            _ => None,
         };
 
         match room_close_receiver.recv().await {
             Some(close) => {
-                let expected_close = maybe_expected_close
-                        .expect("task gave close request unexpectedly");
+                let expected_close =
+                    maybe_expected_close.expect("task gave close request unexpectedly");
 
                 assert_eq!(close.0, expected_close.0);
                 // There is no way to check the stream was the same from here:
                 // This will be checked in integration tests.
                 assert_eq!(close.2, expected_close.1);
-            },
-            None => assert!(maybe_expected_close.is_none())
+            }
+            None => assert!(maybe_expected_close.is_none()),
         };
 
         task.handle().await.expect("task was aborted");
-        
+
         Ok(())
     }
 
@@ -676,7 +701,7 @@ mod tests {
             let res = $s.next().await.expect("stream ended early");
             let msg = res.expect("error receiving message from server");
             assert_eq!(msg, Message::Text(String::from($m)));
-        }
+        };
     }
 
     macro_rules! assert_ping {
@@ -684,20 +709,22 @@ mod tests {
             let res = $s.next().await.expect("stream ended early");
             let msg = res.expect("error receiving message from server");
             assert_eq!(msg, Message::Ping(vec!()));
-        }
+        };
     }
 
     macro_rules! assert_end {
         ($s:ident) => {
-            $s.next().await.unwrap().expect_err("expected connection to be dropped");
-        }
+            $s.next()
+                .await
+                .unwrap()
+                .expect_err("expected connection to be dropped");
+        };
     }
 
     #[tokio::test]
     async fn player_in_room() {
-        let (handle, shutdown_send) = crate::server_setup!(10002, 26,
-                player_in_room_server);
-        
+        let (handle, shutdown_send) = crate::server_setup!(10002, 26, player_in_room_server);
+
         let mut stream = crate::client_setup!(10002);
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAA\n");
@@ -752,7 +779,8 @@ mod tests {
 
         // Check that the new timeout works.
         sleep(Duration::from_secs(9)).await;
-        loop { // Same issue as above.
+        loop {
+            // Same issue as above.
             if let Err(_) = stream.next().await.unwrap() {
                 break;
             }
@@ -765,8 +793,14 @@ mod tests {
         assert_ping!(stream);
 
         // Test that sending one too many pongs closes the connection.
-        stream.send(Message::Pong(vec!())).await.expect("failed to send pong");
-        stream.send(Message::Pong(vec!())).await.expect("failed to send pong");
+        stream
+            .send(Message::Pong(vec![]))
+            .await
+            .expect("failed to send pong");
+        stream
+            .send(Message::Pong(vec![]))
+            .await
+            .expect("failed to send pong");
         assert_end!(stream);
 
         let mut stream = crate::client_setup!(10002);
@@ -778,7 +812,9 @@ mod tests {
 
         // Test that sending the shutdown signal closes the connection.
         // NOTE: No requests should be made to the room from this.
-        shutdown_send.send(()).expect("failed to send shutdown signal");
+        shutdown_send
+            .send(())
+            .expect("failed to send shutdown signal");
         assert_end!(stream);
 
         {
@@ -842,10 +878,11 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAJ\n");
         assert_ping!(stream);
-        let invalid_utf8 = unsafe {
-            String::from_utf8_unchecked(vec![56, 123, 213, 85, 7])
-        };
-        stream.send(Message::Text(invalid_utf8)).await.expect("failed to send");
+        let invalid_utf8 = unsafe { String::from_utf8_unchecked(vec![56, 123, 213, 85, 7]) };
+        stream
+            .send(Message::Text(invalid_utf8))
+            .await
+            .expect("failed to send");
         assert_end!(stream);
 
         // Test sending a binary message.
@@ -853,7 +890,10 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAK\n");
         assert_ping!(stream);
-        stream.send(Message::Binary(vec!(0, 1, 2))).await.expect("failed to send");
+        stream
+            .send(Message::Binary(vec![0, 1, 2]))
+            .await
+            .expect("failed to send");
         assert_end!(stream);
 
         // Test sending close messages.
@@ -861,16 +901,26 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAL\n");
         assert_ping!(stream);
-        stream.close(Some(CloseFrame{ code: CloseCode::Normal, reason: "".into() }))
-                .await.expect("failed to send close");
+        stream
+            .close(Some(CloseFrame {
+                code: CloseCode::Normal,
+                reason: "".into(),
+            }))
+            .await
+            .expect("failed to send close");
         assert_end!(stream);
 
         let mut stream = crate::client_setup!(10002);
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAM\n");
         assert_ping!(stream);
-        stream.close(Some(CloseFrame{ code: CloseCode::Error, reason: "".into() }))
-                .await.expect("failed to send close");
+        stream
+            .close(Some(CloseFrame {
+                code: CloseCode::Error,
+                reason: "".into(),
+            }))
+            .await
+            .expect("failed to send close");
         assert_end!(stream);
 
         // Test sending a message that doesn't have a newline in it.
@@ -878,7 +928,10 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAN\n");
         assert_ping!(stream);
-        stream.send(Message::Text("O: 1yo!".into())).await.expect("failed to send");
+        stream
+            .send(Message::Text("O: 1yo!".into()))
+            .await
+            .expect("failed to send");
         assert_end!(stream);
 
         // Test sending a message without a space in it.
@@ -886,7 +939,10 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAO\n");
         assert_ping!(stream);
-        stream.send(Message::Text("S:\n".into())).await.expect("failed to send");
+        stream
+            .send(Message::Text("S:\n".into()))
+            .await
+            .expect("failed to send");
         assert_end!(stream);
 
         // Test sending a message with an invalid command.
@@ -894,7 +950,10 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAP\n");
         assert_ping!(stream);
-        stream.send(Message::Text("X: 2\nwhy".into())).await.expect("failed to send");
+        stream
+            .send(Message::Text("X: 2\nwhy".into()))
+            .await
+            .expect("failed to send");
         assert_end!(stream);
 
         // Test sending a message with a PlayerID that is not an integer.
@@ -902,7 +961,10 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAQ\n");
         assert_ping!(stream);
-        stream.send(Message::Text("A: dave\nhi!".into())).await.expect("failed to send");
+        stream
+            .send(Message::Text("A: dave\nhi!".into()))
+            .await
+            .expect("failed to send");
         assert_end!(stream);
 
         // Test sending a message with a PlayerID that is blank.
@@ -910,7 +972,10 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAR\n");
         assert_ping!(stream);
-        stream.send(Message::Text("O: \nwhut".into())).await.expect("failed to send");
+        stream
+            .send(Message::Text("O: \nwhut".into()))
+            .await
+            .expect("failed to send");
         assert_end!(stream);
 
         // Test sending a message with a PlayerID that is negative.
@@ -918,7 +983,10 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAS\n");
         assert_ping!(stream);
-        stream.send(Message::Text("C: -7\nuh oh".into())).await.expect("failed to send");
+        stream
+            .send(Message::Text("C: -7\nuh oh".into()))
+            .await
+            .expect("failed to send");
         assert_end!(stream);
 
         // Test sending a message with a PlayerID that is too big.
@@ -926,7 +994,10 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAT\n");
         assert_ping!(stream);
-        stream.send(Message::Text("O: 4294967296\n>u32".into())).await.expect("failed to send");
+        stream
+            .send(Message::Text("O: 4294967296\n>u32".into()))
+            .await
+            .expect("failed to send");
         assert_end!(stream);
 
         // Test sending a seal request with a payload.
@@ -934,7 +1005,10 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAU\n");
         assert_ping!(stream);
-        stream.send(Message::Text("S: \npayload!".into())).await.expect("failed to send");
+        stream
+            .send(Message::Text("S: \npayload!".into()))
+            .await
+            .expect("failed to send");
         assert_end!(stream);
 
         // Test sending a WebRTC message without a payload.
@@ -942,7 +1016,10 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAV\n");
         assert_ping!(stream);
-        stream.send(Message::Text("C: 20\n".into())).await.expect("failed to send");
+        stream
+            .send(Message::Text("C: 20\n".into()))
+            .await
+            .expect("failed to send");
         assert_end!(stream);
 
         // Test sending a WebRTC message with a payload that is slightly too big.
@@ -951,8 +1028,10 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAW\n");
         assert_ping!(stream);
-        stream.send(Message::Text(slightly_too_long)).await
-                .expect_err("message should not have been received");
+        stream
+            .send(Message::Text(slightly_too_long))
+            .await
+            .expect_err("message should not have been received");
         assert_end!(stream);
 
         // Test creating a room while already in a room.
@@ -960,7 +1039,10 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAX\n");
         assert_ping!(stream);
-        stream.send(Message::Text("J: \n".into())).await.expect("failed to send");
+        stream
+            .send(Message::Text("J: \n".into()))
+            .await
+            .expect("failed to send");
         assert_end!(stream);
 
         // Test joining a room while already in a room.
@@ -968,7 +1050,10 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAY\n");
         assert_ping!(stream);
-        stream.send(Message::Text("J: BEAN\n".into())).await.expect("failed to send");
+        stream
+            .send(Message::Text("J: BEAN\n".into()))
+            .await
+            .expect("failed to send");
         assert_end!(stream);
 
         // Test valid requests.
@@ -976,12 +1061,27 @@ mod tests {
         assert_msg!(stream, "I: 1\n");
         assert_msg!(stream, "J: AAAZ\n");
         assert_ping!(stream);
-        stream.send(Message::Text("S: \n".into())).await.expect("failed to send");
+        stream
+            .send(Message::Text("S: \n".into()))
+            .await
+            .expect("failed to send");
         // NOTE: 0 is an invalid PlayerID, but the room checks this.
-        stream.send(Message::Text("O: 0\n\\o/".into())).await.expect("failed to send");
-        stream.send(Message::Text("A: 4294967295\nboi".into())).await.expect("failed to send");
-        stream.send(Message::Text("C: 1\ndone!".into())).await.expect("failed to send");
-        stream.close(None).await.expect("failed to send close message");
+        stream
+            .send(Message::Text("O: 0\n\\o/".into()))
+            .await
+            .expect("failed to send");
+        stream
+            .send(Message::Text("A: 4294967295\nboi".into()))
+            .await
+            .expect("failed to send");
+        stream
+            .send(Message::Text("C: 1\ndone!".into()))
+            .await
+            .expect("failed to send");
+        stream
+            .close(None)
+            .await
+            .expect("failed to send close message");
         assert_end!(stream);
 
         handle.await.expect("server was aborted");

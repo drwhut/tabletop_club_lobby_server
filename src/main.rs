@@ -111,13 +111,11 @@ async fn main() -> Result<(), std::io::Error> {
 
         info!("tls enabled, creating identity");
         match Identity::from_pkcs8(&cert_bytes, &key_bytes) {
-            Ok(identity) => {
-                match TlsAcceptor::new(identity) {
-                    Ok(acceptor) => Some(TlsAcceptorAsync::from(acceptor)),
-                    Err(e) => {
-                        error!(error = %e, "failed to create acceptor, tls disabled");
-                        None
-                    }
+            Ok(identity) => match TlsAcceptor::new(identity) {
+                Ok(acceptor) => Some(TlsAcceptorAsync::from(acceptor)),
+                Err(e) => {
+                    error!(error = %e, "failed to create acceptor, tls disabled");
+                    None
                 }
             },
             Err(e) => {
@@ -162,8 +160,7 @@ async fn main() -> Result<(), std::io::Error> {
     };
 
     // Start the server by spawning it's task!
-    let server_handle = tokio::spawn(
-            tabletop_club_lobby_server::server_task(server_context));
+    let server_handle = tokio::spawn(tabletop_club_lobby_server::server_task(server_context));
 
     // Now that we've started the server, we should wait for any signals from
     // the OS to terminate the process, so that we can shutdown gracefully.
@@ -199,11 +196,15 @@ async fn main() -> Result<(), std::io::Error> {
     // A shutdown signal was received, now we need to let all of the spawned
     // tasks know and let them finish gracefully.
     info!("shutdown signal received");
-    shutdown_sender.send(()).expect("shutdown broadcast could not be sent");
+    shutdown_sender
+        .send(())
+        .expect("shutdown broadcast could not be sent");
 
     // Wait for the server task to finish, which itself should wait for all of
     // its spawned tasks to finish.
-    server_handle.await.expect("server task did not finish to completion");
+    server_handle
+        .await
+        .expect("server task did not finish to completion");
 
     Ok(())
 }

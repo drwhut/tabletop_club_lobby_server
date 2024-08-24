@@ -83,7 +83,7 @@ pub enum RoomCommand {
 
     /// The client's connection should be dropped, as there is nothing else we
     /// can do with it.
-    /// 
+    ///
     /// **NOTE:** Unlike in [`LobbyCommand`], closing a connection is done in
     /// a separate channel, since the room needs the stream from the player task
     /// in order to close the connection properly - all of the commands in here
@@ -121,7 +121,7 @@ pub enum RoomNotification {
     PlayerJoined(u32),
 
     /// The player with the given ID has left the room.
-    /// 
+    ///
     /// **NOTE:** This does NOT include the host. If the host leaves the room,
     /// [`RoomNotification::HostLeft`] will be sent instead.
     PlayerLeft(u32),

@@ -89,13 +89,13 @@ impl Default for VariableConfig {
 macro_rules! check_range {
     ($o:ident, $k:ident, $r:expr) => {
         if !($r).contains(&$o.$k) {
-            return Err(VariableConfigError::OutOfRange{
+            return Err(VariableConfigError::OutOfRange {
                 key: stringify!($k),
                 value: $o.$k as usize,
-                range: $r
-            })
+                range: $r,
+            });
         }
-    }
+    };
 }
 
 /// Helper macro for checking if the value of a property is less than the value
@@ -103,12 +103,12 @@ macro_rules! check_range {
 macro_rules! check_lt {
     ($o:ident, $l:ident, $g:ident) => {
         if ($o.$l) >= ($o.$g) {
-            return Err(VariableConfigError::GreaterOrEqual{
+            return Err(VariableConfigError::GreaterOrEqual {
                 key1: stringify!($l),
                 value1: $o.$l as usize,
                 key2: stringify!($g),
-                value2: $o.$g as usize
-            })
+                value2: $o.$g as usize,
+            });
         }
     };
 }
@@ -121,9 +121,9 @@ impl VariableConfig {
         match toml_edit::de::from_str::<VariableConfig>(&file_content) {
             Ok(config) => match config.validate() {
                 Ok(_) => Ok(config),
-                Err(e) => Err(std::io::Error::other(e))
+                Err(e) => Err(std::io::Error::other(e)),
             },
-            Err(e) => Err(std::io::Error::other(e))
+            Err(e) => Err(std::io::Error::other(e)),
         }
     }
 
@@ -261,23 +261,45 @@ impl VariableConfig {
 }
 
 /// The types of validation errors that can occur when reading the config file.
-/// 
+///
 /// **NOTE:** This does not include invalid types, or filesystem errors. These
 /// are handled by the libraries.
 #[derive(Debug)]
 pub enum VariableConfigError {
-    OutOfRange{ key: &'static str, value: usize, range: Range<usize> },
-    GreaterOrEqual{ key1: &'static str, value1: usize, key2: &'static str, value2: usize },
+    OutOfRange {
+        key: &'static str,
+        value: usize,
+        range: Range<usize>,
+    },
+    GreaterOrEqual {
+        key1: &'static str,
+        value1: usize,
+        key2: &'static str,
+        value2: usize,
+    },
 }
 
 impl fmt::Display for VariableConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::OutOfRange { key, value, range } => write!(f, "value of `{}` is out of range (range: {}-{}, got: {})",
-                    key, range.start, range.end - 1, value),
-            Self::GreaterOrEqual { key1, value1, key2, value2 } =>
-                    write!(f, "value of `{}` ({}) is more than or equal to the value of `{}` ({})",
-                            key1, value1, key2, value2),
+            Self::OutOfRange { key, value, range } => write!(
+                f,
+                "value of `{}` is out of range (range: {}-{}, got: {})",
+                key,
+                range.start,
+                range.end - 1,
+                value
+            ),
+            Self::GreaterOrEqual {
+                key1,
+                value1,
+                key2,
+                value2,
+            } => write!(
+                f,
+                "value of `{}` ({}) is more than or equal to the value of `{}` ({})",
+                key1, value1, key2, value2
+            ),
         }
     }
 }
@@ -369,7 +391,9 @@ mod tests {
         ($b:literal, $a:literal, $e:literal) => {
             let content = String::from(VALID_CONTENTS).replace($b, $a);
             fs::write("__read_err__.toml", content).await?;
-            let e = VariableConfig::read_config_file("__read_err__.toml").await.unwrap_err();
+            let e = VariableConfig::read_config_file("__read_err__.toml")
+                .await
+                .unwrap_err();
             assert_eq!(e.to_string(), $e);
         };
     }
@@ -391,16 +415,23 @@ reconnect_wait_limit_secs = 5";
     async fn read_err() -> Result<(), std::io::Error> {
         // File with no values.
         fs::write("__read_err__.toml", "").await?;
-        let e = VariableConfig::read_config_file("__read_err__.toml").await.unwrap_err();
+        let e = VariableConfig::read_config_file("__read_err__.toml")
+            .await
+            .unwrap_err();
         assert_eq!(e.to_string(), "TOML parse error at line 1, column 1\n  |\n1 | \n  | ^\nmissing field `max_message_size`\n");
 
         // File with one value missing.
-        check_replace!("max_rooms = 10", "",
-                "TOML parse error at line 1, column 1\n  |\n1 | \n  | ^\nmissing field `max_rooms`\n");
+        check_replace!(
+            "max_rooms = 10",
+            "",
+            "TOML parse error at line 1, column 1\n  |\n1 | \n  | ^\nmissing field `max_rooms`\n"
+        );
 
         // File with all values (checking VALID_CONTENTS is actually valid).
         fs::write("__read_err__.toml", VALID_CONTENTS).await?;
-        assert!(VariableConfig::read_config_file("__read_err__.toml").await.is_ok());
+        assert!(VariableConfig::read_config_file("__read_err__.toml")
+            .await
+            .is_ok());
 
         // Value with wrong type.
         check_replace!("player_queue_capacity = 10", "player_queue_capacity = \"10\"",
@@ -411,55 +442,112 @@ reconnect_wait_limit_secs = 5";
                 "TOML parse error at line 5, column 24\n  |\n5 | max_players_per_room = -1\n  |                        ^^\ninvalid value: integer `-1`, expected usize\n");
 
         // Out of range values.
-        check_replace!("max_message_size = 1100", "max_message_size = 10",
-                "value of `max_message_size` is out of range (range: 100-99999999, got: 10)");
-        check_replace!("max_message_size = 1100", "max_message_size = 500000000",
-                "value of `max_message_size` is out of range (range: 100-99999999, got: 500000000)");
+        check_replace!(
+            "max_message_size = 1100",
+            "max_message_size = 10",
+            "value of `max_message_size` is out of range (range: 100-99999999, got: 10)"
+        );
+        check_replace!(
+            "max_message_size = 1100",
+            "max_message_size = 500000000",
+            "value of `max_message_size` is out of range (range: 100-99999999, got: 500000000)"
+        );
 
-        check_replace!("max_payload_size = 1000", "max_payload_size = 99",
-                "value of `max_payload_size` is out of range (range: 100-99999999, got: 99)");
-        check_replace!("max_payload_size = 1000", "max_payload_size = 250000000",
-                "value of `max_payload_size` is out of range (range: 100-99999999, got: 250000000)");
+        check_replace!(
+            "max_payload_size = 1000",
+            "max_payload_size = 99",
+            "value of `max_payload_size` is out of range (range: 100-99999999, got: 99)"
+        );
+        check_replace!(
+            "max_payload_size = 1000",
+            "max_payload_size = 250000000",
+            "value of `max_payload_size` is out of range (range: 100-99999999, got: 250000000)"
+        );
 
-        check_replace!("max_players_per_address = 10", "max_players_per_address = 0",
-                "value of `max_players_per_address` is out of range (range: 1-999, got: 0)");
-        check_replace!("max_players_per_address = 10", "max_players_per_address = 1000",
-                "value of `max_players_per_address` is out of range (range: 1-999, got: 1000)");
+        check_replace!(
+            "max_players_per_address = 10",
+            "max_players_per_address = 0",
+            "value of `max_players_per_address` is out of range (range: 1-999, got: 0)"
+        );
+        check_replace!(
+            "max_players_per_address = 10",
+            "max_players_per_address = 1000",
+            "value of `max_players_per_address` is out of range (range: 1-999, got: 1000)"
+        );
 
-        check_replace!("max_players_per_room = 10", "max_players_per_room = 0",
-                "value of `max_players_per_room` is out of range (range: 1-99, got: 0)");
-        check_replace!("max_players_per_room = 10", "max_players_per_room = 150",
-                "value of `max_players_per_room` is out of range (range: 1-99, got: 150)");
+        check_replace!(
+            "max_players_per_room = 10",
+            "max_players_per_room = 0",
+            "value of `max_players_per_room` is out of range (range: 1-99, got: 0)"
+        );
+        check_replace!(
+            "max_players_per_room = 10",
+            "max_players_per_room = 150",
+            "value of `max_players_per_room` is out of range (range: 1-99, got: 150)"
+        );
 
-        check_replace!("max_rooms = 10", "max_rooms = 0",
-                "value of `max_rooms` is out of range (range: 1-399999, got: 0)");
-        check_replace!("max_rooms = 10", "max_rooms = 500000",
-                "value of `max_rooms` is out of range (range: 1-399999, got: 500000)");
-        
-        check_replace!("player_queue_capacity = 10", "player_queue_capacity = 0",
-                "value of `player_queue_capacity` is out of range (range: 1-9999, got: 0)");
-        check_replace!("player_queue_capacity = 10", "player_queue_capacity = 50000",
-                "value of `player_queue_capacity` is out of range (range: 1-9999, got: 50000)");
+        check_replace!(
+            "max_rooms = 10",
+            "max_rooms = 0",
+            "value of `max_rooms` is out of range (range: 1-399999, got: 0)"
+        );
+        check_replace!(
+            "max_rooms = 10",
+            "max_rooms = 500000",
+            "value of `max_rooms` is out of range (range: 1-399999, got: 500000)"
+        );
 
-        check_replace!("join_room_time_limit_secs = 3", "join_room_time_limit_secs = 0",
-                "value of `join_room_time_limit_secs` is out of range (range: 1-59, got: 0)");
-        check_replace!("join_room_time_limit_secs = 3", "join_room_time_limit_secs = 120",
-                "value of `join_room_time_limit_secs` is out of range (range: 1-59, got: 120)");
-        
-        check_replace!("ping_interval_secs = 5", "ping_interval_secs = 0",
-                "value of `ping_interval_secs` is out of range (range: 1-59, got: 0)");
-        check_replace!("ping_interval_secs = 5", "ping_interval_secs = 90",
-                "value of `ping_interval_secs` is out of range (range: 1-59, got: 90)");
-        
-        check_replace!("response_time_limit_secs = 20", "response_time_limit_secs = 4",
-                "value of `response_time_limit_secs` is out of range (range: 5-119, got: 4)");
-        check_replace!("response_time_limit_secs = 20", "response_time_limit_secs = 150",
-                "value of `response_time_limit_secs` is out of range (range: 5-119, got: 150)");
-        
+        check_replace!(
+            "player_queue_capacity = 10",
+            "player_queue_capacity = 0",
+            "value of `player_queue_capacity` is out of range (range: 1-9999, got: 0)"
+        );
+        check_replace!(
+            "player_queue_capacity = 10",
+            "player_queue_capacity = 50000",
+            "value of `player_queue_capacity` is out of range (range: 1-9999, got: 50000)"
+        );
+
+        check_replace!(
+            "join_room_time_limit_secs = 3",
+            "join_room_time_limit_secs = 0",
+            "value of `join_room_time_limit_secs` is out of range (range: 1-59, got: 0)"
+        );
+        check_replace!(
+            "join_room_time_limit_secs = 3",
+            "join_room_time_limit_secs = 120",
+            "value of `join_room_time_limit_secs` is out of range (range: 1-59, got: 120)"
+        );
+
+        check_replace!(
+            "ping_interval_secs = 5",
+            "ping_interval_secs = 0",
+            "value of `ping_interval_secs` is out of range (range: 1-59, got: 0)"
+        );
+        check_replace!(
+            "ping_interval_secs = 5",
+            "ping_interval_secs = 90",
+            "value of `ping_interval_secs` is out of range (range: 1-59, got: 90)"
+        );
+
+        check_replace!(
+            "response_time_limit_secs = 20",
+            "response_time_limit_secs = 4",
+            "value of `response_time_limit_secs` is out of range (range: 5-119, got: 4)"
+        );
+        check_replace!(
+            "response_time_limit_secs = 20",
+            "response_time_limit_secs = 150",
+            "value of `response_time_limit_secs` is out of range (range: 5-119, got: 150)"
+        );
+
         // No lower bound for 'reconnect_wait_limit_secs'.
-        check_replace!("reconnect_wait_limit_secs = 5", "reconnect_wait_limit_secs = 120",
-                "value of `reconnect_wait_limit_secs` is out of range (range: 0-59, got: 120)");
-        
+        check_replace!(
+            "reconnect_wait_limit_secs = 5",
+            "reconnect_wait_limit_secs = 120",
+            "value of `reconnect_wait_limit_secs` is out of range (range: 0-59, got: 120)"
+        );
+
         // Certain properties cannot be greater than others.
         check_replace!("max_message_size = 1100", "max_message_size = 900",
                 "value of `max_payload_size` (1000) is more than or equal to the value of `max_message_size` (900)");
@@ -470,7 +558,7 @@ reconnect_wait_limit_secs = 5";
                 "value of `join_room_time_limit_secs` (6) is more than or equal to the value of `ping_interval_secs` (5)");
         check_replace!("ping_interval_secs = 5", "ping_interval_secs = 2",
                 "value of `join_room_time_limit_secs` (3) is more than or equal to the value of `ping_interval_secs` (2)");
-        
+
         check_replace!("ping_interval_secs = 5", "ping_interval_secs = 30",
                 "value of `ping_interval_secs` (30) is more than or equal to the value of `response_time_limit_secs` (20)");
         check_replace!("response_time_limit_secs = 20", "response_time_limit_secs = 5",
@@ -487,18 +575,25 @@ reconnect_wait_limit_secs = 5";
         let (shutdown_send, shutdown_receive) = broadcast::channel::<()>(1);
 
         // Verify that the file doesn't exist.
-        let test_file_exists = fs::try_exists("__no_file__.toml").await.expect("could not check if file exists");
+        let test_file_exists = fs::try_exists("__no_file__.toml")
+            .await
+            .expect("could not check if file exists");
         assert!(!test_file_exists);
 
         // If the file doesn't exist, then no updates should come through the
         // watch channel immediately.
-        let handle = tokio::spawn(update_config_task("__no_file__.toml",
-                watch_send, shutdown_receive));
-        
+        let handle = tokio::spawn(update_config_task(
+            "__no_file__.toml",
+            watch_send,
+            shutdown_receive,
+        ));
+
         assert_eq!(*watch_receive.borrow(), VariableConfig::default());
         assert!(!watch_receive.has_changed().unwrap());
 
-        shutdown_send.send(()).expect("failed to send shutdown signal");
+        shutdown_send
+            .send(())
+            .expect("failed to send shutdown signal");
         handle.await.expect("task was aborted");
     }
 
@@ -508,12 +603,18 @@ reconnect_wait_limit_secs = 5";
         let (shutdown_send, shutdown_receive) = broadcast::channel::<()>(1);
 
         // Create a config file with the default settings.
-        VariableConfig::default().write_config_file("__default__.toml").await.expect("failed to write config file");
+        VariableConfig::default()
+            .write_config_file("__default__.toml")
+            .await
+            .expect("failed to write config file");
 
         // If a config file exists, but it has the default settings, then no
         // updates should come through the watch channel immediately.
-        let handle = tokio::spawn(update_config_task("__default__.toml",
-                watch_send, shutdown_receive));
+        let handle = tokio::spawn(update_config_task(
+            "__default__.toml",
+            watch_send,
+            shutdown_receive,
+        ));
 
         assert_eq!(*watch_receive.borrow(), VariableConfig::default());
         assert!(!watch_receive.has_changed().unwrap());
@@ -529,11 +630,14 @@ reconnect_wait_limit_secs = 5";
             join_room_time_limit_secs: 5,
             ping_interval_secs: 10,
             response_time_limit_secs: 20,
-            reconnect_wait_limit_secs: 5
+            reconnect_wait_limit_secs: 5,
         };
         assert!(test_config.validate().is_ok());
-        
-        test_config.write_config_file("__default__.toml").await.expect("failed to write config file");
+
+        test_config
+            .write_config_file("__default__.toml")
+            .await
+            .expect("failed to write config file");
 
         // Now the config file has updated, the task's next pass should detect
         // the change and send an update to the watch channel.
@@ -542,10 +646,14 @@ reconnect_wait_limit_secs = 5";
         watch_receive.changed().await.unwrap();
         assert_eq!(*watch_receive.borrow(), test_config);
 
-        shutdown_send.send(()).expect("failed to send shutdown signal");
+        shutdown_send
+            .send(())
+            .expect("failed to send shutdown signal");
         handle.await.expect("task was aborted");
 
-        fs::remove_file("__default__.toml").await.expect("failed to remove test file");
+        fs::remove_file("__default__.toml")
+            .await
+            .expect("failed to remove test file");
     }
 
     #[tokio::test(start_paused = true)]
@@ -564,16 +672,22 @@ reconnect_wait_limit_secs = 5";
             join_room_time_limit_secs: 30,
             ping_interval_secs: 40,
             response_time_limit_secs: 60,
-            reconnect_wait_limit_secs: 10
+            reconnect_wait_limit_secs: 10,
         };
         assert!(test_config.validate().is_ok());
 
-        test_config.write_config_file("__modified__.toml").await.expect("failed to write config file");
+        test_config
+            .write_config_file("__modified__.toml")
+            .await
+            .expect("failed to write config file");
 
         // If a config file exists, and it differs from the default, then the
         // task should immediately send an update through the watch channel.
-        let handle = tokio::spawn(update_config_task("__modified__.toml",
-                watch_send, shutdown_receive));
+        let handle = tokio::spawn(update_config_task(
+            "__modified__.toml",
+            watch_send,
+            shutdown_receive,
+        ));
 
         watch_receive.changed().await.unwrap();
         assert_eq!(*watch_receive.borrow(), test_config);
@@ -589,11 +703,14 @@ reconnect_wait_limit_secs = 5";
             join_room_time_limit_secs: 10,
             ping_interval_secs: 15,
             response_time_limit_secs: 20,
-            reconnect_wait_limit_secs: 5
+            reconnect_wait_limit_secs: 5,
         };
         assert!(test_config.validate().is_ok());
-        
-        test_config.write_config_file("__modified__.toml").await.expect("failed to write config file");
+
+        test_config
+            .write_config_file("__modified__.toml")
+            .await
+            .expect("failed to write config file");
 
         // Now the config file has updated, the task's next pass should detect
         // the change and send another update to the watch channel.
@@ -602,9 +719,13 @@ reconnect_wait_limit_secs = 5";
         watch_receive.changed().await.unwrap();
         assert_eq!(*watch_receive.borrow(), test_config);
 
-        shutdown_send.send(()).expect("failed to send shutdown signal");
+        shutdown_send
+            .send(())
+            .expect("failed to send shutdown signal");
         handle.await.expect("task was aborted");
 
-        fs::remove_file("__modified__.toml").await.expect("failed to remove test file");
+        fs::remove_file("__modified__.toml")
+            .await
+            .expect("failed to remove test file");
     }
 }

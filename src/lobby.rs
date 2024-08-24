@@ -24,8 +24,8 @@ SOFTWARE.
 use crate::close_code::CustomCloseCode;
 use crate::config::VariableConfig;
 use crate::message::LobbyCommand;
-use crate::player::*;
 use crate::player::joining::*;
+use crate::player::*;
 
 use core::net::IpAddr;
 use nohash_hasher::IntMap;
@@ -86,8 +86,7 @@ pub async fn lobby_task(mut context: LobbyContext) {
 
     debug!(
         max_players_per_address,
-        player_queue_capacity,
-        join_room_time_limit_secs, "read config"
+        player_queue_capacity, join_room_time_limit_secs, "read config"
     );
 
     // Create dedicated [`Duration`] structures for time limits.
