@@ -733,6 +733,7 @@ enum ParseError {
     NoNewline,
     NoSpace,
     UnexpectedPayload,
+    ExpectedPayload,
     InvalidCommand,
     InvalidArgument,
 }
@@ -743,6 +744,7 @@ impl fmt::Display for ParseError {
             Self::NoNewline => write!(f, "no new line character in message"),
             Self::NoSpace => write!(f, "no space character between command and argument"),
             Self::UnexpectedPayload => write!(f, "received a payload when we did not expect one"),
+            Self::ExpectedPayload => write!(f, "did not receive a payload when we expected one"),
             Self::InvalidCommand => write!(f, "invalid command"),
             Self::InvalidArgument => write!(f, "invalid argument"),
         }
@@ -784,7 +786,10 @@ fn parse_player_request(msg: &str) -> Result<PlayerRequest, ParseError> {
                 },
                 "O:" => {
                     if let Ok(player_id) = argument.parse::<PlayerID>() {
-                        // TODO: Add checks for the payload?
+                        if payload.is_empty() {
+                            return Err(ParseError::ExpectedPayload);
+                        }
+
                         Ok(PlayerRequest::Offer(player_id, String::from(payload)))
                     } else {
                         Err(ParseError::InvalidArgument)
@@ -792,6 +797,10 @@ fn parse_player_request(msg: &str) -> Result<PlayerRequest, ParseError> {
                 },
                 "A:" => {
                     if let Ok(player_id) = argument.parse::<PlayerID>() {
+                        if payload.is_empty() {
+                            return Err(ParseError::ExpectedPayload);
+                        }
+
                         Ok(PlayerRequest::Answer(player_id, String::from(payload)))
                     } else {
                         Err(ParseError::InvalidArgument)
@@ -799,6 +808,10 @@ fn parse_player_request(msg: &str) -> Result<PlayerRequest, ParseError> {
                 },
                 "C:" => {
                     if let Ok(player_id) = argument.parse::<PlayerID>() {
+                        if payload.is_empty() {
+                            return Err(ParseError::ExpectedPayload);
+                        }
+
                         Ok(PlayerRequest::Candidate(player_id, String::from(payload)))
                     } else {
                         Err(ParseError::InvalidArgument)
@@ -821,6 +834,7 @@ fn parse_error_to_close_code(e: ParseError) -> CloseCode {
         ParseError::NoNewline => CustomCloseCode::InvalidFormat.into(),
         ParseError::NoSpace => CustomCloseCode::InvalidFormat.into(),
         ParseError::UnexpectedPayload => CustomCloseCode::InvalidFormat.into(),
+        ParseError::ExpectedPayload => CustomCloseCode::InvalidFormat.into(),
         ParseError::InvalidCommand => CustomCloseCode::InvalidCommand.into(),
         ParseError::InvalidArgument => CustomCloseCode::InvalidDestination.into(),
     }
@@ -1040,19 +1054,22 @@ mod tests {
     }
 
     async fn player_in_room_server(stream: PlayerStream, index: u32, shutdown: broadcast::Receiver<()>) -> Result<(), mpsc::error::SendError<RoomNotification>> {
-        let room_code_int = (65 << 24) | (65 << 16) | (65 << 8) | (65 + index);
+        let room_code_int = ((65 << 24) | (65 << 16) | (65 << 8) | (65 << 0))
+                + (index % 26);
         let room_code: RoomCode = room_code_int.try_into().unwrap();
 
         let player_id = match index {
             2 => 1024,
             3 => 6732,
             4 => 7,
+            8 => 2048,
             _ => 1,
         };
         let other_ids = match index {
             2 => vec!(1),
             3 => vec!(1, 4261),
             4 => vec!(6, 5, 4, 3, 2, 1),
+            8 => vec!(1, 512),
             _ => vec!(),
         };
 
@@ -1113,6 +1130,94 @@ mod tests {
                 let noti = RoomNotification::PlayerJoined(6750);
                 room_notification_sender.send(noti).await?;
             },
+            5 => {
+                sleep(Duration::from_millis(500)).await;
+
+                // Send out a range of notifications to see if the client
+                // receives them in the correct format.
+                // NOTE: 0 is an invalid index for a PlayerID, but this could
+                // change in the future. It's also the room's responsibility to
+                // make sure player IDs are valid.
+                let noti = RoomNotification::PlayerJoined(0);
+                room_notification_sender.send(noti).await?;
+
+                let noti = RoomNotification::PlayerJoined(145265);
+                room_notification_sender.send(noti).await?;
+
+                let noti = RoomNotification::PlayerJoined(std::u32::MAX);
+                room_notification_sender.send(noti).await?;
+
+                // Again, this would be invalid in a real senario, but it's the
+                // room's responsibility to send valid notifications.
+                let noti = RoomNotification::PlayerLeft(1);
+                room_notification_sender.send(noti).await?;
+
+                let noti = RoomNotification::PlayerLeft(4246273);
+                room_notification_sender.send(noti).await?;
+
+                let noti = RoomNotification::PlayerLeft(std::u32::MAX);
+                room_notification_sender.send(noti).await?;
+
+                let noti = RoomNotification::OfferReceived(200, "hello world!".into());
+                room_notification_sender.send(noti).await?;
+
+                let noti = RoomNotification::OfferReceived(std::u32::MAX,
+                        "max integer".into());
+                room_notification_sender.send(noti).await?;
+
+                let noti = RoomNotification::AnswerReceived(1000,
+                        "lol\n2nd line!".into());
+                room_notification_sender.send(noti).await?;
+
+                // Send a message just under the payload limit of 16 MiB.
+                let long = "?".repeat(16777211);
+                let noti = RoomNotification::CandidateReceived(1, long);
+                room_notification_sender.send(noti).await?;
+
+                // If the host left, the task should stop and send back a close
+                // request.
+                room_notification_sender.send(RoomNotification::HostLeft).await?;
+            },
+            6 => {
+                sleep(Duration::from_millis(500)).await;
+                room_notification_sender.send(RoomNotification::RoomSealed).await?;
+            },
+            7 => {
+                sleep(Duration::from_millis(500)).await;
+                let noti = RoomNotification::Error(CloseCode::Abnormal);
+                room_notification_sender.send(noti).await?;
+            },
+            8 => {
+                sleep(Duration::from_millis(500)).await;
+                let noti = RoomNotification::Error(CustomCloseCode::InvalidCommand.into());
+                room_notification_sender.send(noti).await?;
+            },
+            25 => {
+                // A series of valid requests should come through here.
+                let req = room_request_receiver.recv().await.unwrap();
+                assert_eq!(req, RoomRequest{
+                    player_id: 1,
+                    command: RoomCommand::SealRoom
+                });
+
+                let req = room_request_receiver.recv().await.unwrap();
+                assert_eq!(req, RoomRequest{
+                    player_id: 1,
+                    command: RoomCommand::SendOffer(0, "\\o/".into())
+                });
+
+                let req = room_request_receiver.recv().await.unwrap();
+                assert_eq!(req, RoomRequest{
+                    player_id: 1,
+                    command: RoomCommand::SendAnswer(4294967295, "boi".into())
+                });
+
+                let req = room_request_receiver.recv().await.unwrap();
+                assert_eq!(req, RoomRequest{
+                    player_id: 1,
+                    command: RoomCommand::SendCandidate(1, "done!".into())
+                });
+            },
             _ => {}
         }
 
@@ -1126,28 +1231,60 @@ mod tests {
                 player_id: 1,
                 command: RoomCommand::DropConnection
             }),
+            11 => Some(RoomRequest {
+                player_id: 1,
+                command: RoomCommand::DropConnection
+            }),
+            12 => Some(RoomRequest {
+                player_id: 1,
+                command: RoomCommand::DropConnection
+            }),
+            25 => Some(RoomRequest {
+                player_id: 1,
+                command: RoomCommand::DropConnection
+            }),
             _ => None
         };
 
-        if let Some(expected_req) = maybe_expected_req {
-            let req = room_request_receiver.recv().await.unwrap();
-            assert_eq!(req, expected_req);
-        };
+        assert_eq!(room_request_receiver.recv().await, maybe_expected_req);
 
         // Should we have gotten a close request from the task at the end?
         let maybe_expected_close = match index {
             2 => Some((1024, CloseCode::Protocol)),
             4 => Some((7, CloseCode::Protocol)),
+            5 => Some((1, CustomCloseCode::HostDisconnected.into())),
+            6 => Some((1, CustomCloseCode::RoomSealed.into())),
+            7 => Some((1, CloseCode::Abnormal)),
+            8 => Some((2048, CustomCloseCode::InvalidCommand.into())),
+            9 => Some((1, CloseCode::Invalid)),
+            10 => Some((1, CloseCode::Unsupported)),
+            13 => Some((1, CustomCloseCode::InvalidFormat.into())),
+            14 => Some((1, CustomCloseCode::InvalidFormat.into())),
+            15 => Some((1, CustomCloseCode::InvalidCommand.into())),
+            16 => Some((1, CustomCloseCode::InvalidDestination.into())),
+            17 => Some((1, CustomCloseCode::InvalidDestination.into())),
+            18 => Some((1, CustomCloseCode::InvalidDestination.into())),
+            19 => Some((1, CustomCloseCode::InvalidDestination.into())),
+            20 => Some((1, CustomCloseCode::InvalidFormat.into())),
+            21 => Some((1, CustomCloseCode::InvalidFormat.into())),
+            22 => Some((1, CloseCode::Size)),
+            23 => Some((1, CustomCloseCode::AlreadyInRoom.into())),
+            24 => Some((1, CustomCloseCode::AlreadyInRoom.into())),
             _ => None
         };
 
-        if let Some(expected_close) = maybe_expected_close {
-            let close = room_close_receiver.recv().await.unwrap();
-            assert_eq!(close.0, expected_close.0);
-            // There is no way to check the stream was the same from here:
-            // This will be checked in integration tests.
-            assert_eq!(close.2, expected_close.1);
-        }
+        match room_close_receiver.recv().await {
+            Some(close) => {
+                let expected_close = maybe_expected_close
+                        .expect("task gave close request unexpectedly");
+
+                assert_eq!(close.0, expected_close.0);
+                // There is no way to check the stream was the same from here:
+                // This will be checked in integration tests.
+                assert_eq!(close.2, expected_close.1);
+            },
+            None => assert!(maybe_expected_close.is_none())
+        };
 
         task.handle().await.expect("task was aborted");
         
@@ -1155,7 +1292,7 @@ mod tests {
     }
 
     macro_rules! assert_msg {
-        ($s:ident, $m:literal) => {
+        ($s:ident, $m:expr) => {
             let res = $s.next().await.expect("stream ended early");
             let msg = res.expect("error receiving message from server");
             assert_eq!(msg, Message::Text(String::from($m)));
@@ -1178,7 +1315,7 @@ mod tests {
 
     #[tokio::test]
     async fn player_in_room() {
-        let (handle, shutdown_send) = crate::server_setup!(10002, 5,
+        let (handle, shutdown_send) = crate::server_setup!(10002, 26,
                 player_in_room_server);
         
         let mut stream = crate::client_setup!(10002);
@@ -1277,17 +1414,195 @@ mod tests {
             assert_ping!(stream);
         }
 
-        // test each room notification
-        // (check INT_MAX for PlayerID, payload sizes)
-        // TODO: Check incoming payload sizes, they may BECOME too big when the
-        // destination ID changes.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAF\n");
+        assert_ping!(stream);
 
-        // test erroneous messages
-        // test binary messages
-        // test close messages
-        // test erroneous requests
-        // test requests meant for lobby
-        // test valid requests
+        // Test the message that is received by the client with each
+        // notification type.
+        assert_msg!(stream, "N: 0\n");
+        assert_msg!(stream, "N: 145265\n");
+        assert_msg!(stream, "N: 4294967295\n");
+        assert_msg!(stream, "D: 1\n");
+        assert_msg!(stream, "D: 4246273\n");
+        assert_msg!(stream, "D: 4294967295\n");
+        assert_msg!(stream, "O: 200\nhello world!");
+        assert_msg!(stream, "O: 4294967295\nmax integer");
+        assert_msg!(stream, "A: 1000\nlol\n2nd line!");
+
+        let valid_long = format!("C: 1\n{}", "?".repeat(16777211));
+        assert_msg!(stream, valid_long);
+        assert_end!(stream);
+
+        // Some notifications will result in close requests, rather than direct
+        // messages.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAG\n");
+        assert_ping!(stream);
+        assert_end!(stream);
+
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAH\n");
+        assert_ping!(stream);
+        assert_end!(stream);
+
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 2048\n");
+        assert_msg!(stream, "N: 1\n");
+        assert_msg!(stream, "N: 512\n");
+        assert_msg!(stream, "J: AAAI\n");
+        assert_ping!(stream);
+        assert_end!(stream);
+
+        // Test sending an invalid UTF-8 message.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAJ\n");
+        assert_ping!(stream);
+        let invalid_utf8 = unsafe {
+            String::from_utf8_unchecked(vec![56, 123, 213, 85, 7])
+        };
+        stream.send(Message::Text(invalid_utf8)).await.expect("failed to send");
+        assert_end!(stream);
+
+        // Test sending a binary message.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAK\n");
+        assert_ping!(stream);
+        stream.send(Message::Binary(vec!(0, 1, 2))).await.expect("failed to send");
+        assert_end!(stream);
+
+        // Test sending close messages.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAL\n");
+        assert_ping!(stream);
+        stream.close(Some(CloseFrame{ code: CloseCode::Normal, reason: "".into() }))
+                .await.expect("failed to send close");
+        assert_end!(stream);
+
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAM\n");
+        assert_ping!(stream);
+        stream.close(Some(CloseFrame{ code: CloseCode::Error, reason: "".into() }))
+                .await.expect("failed to send close");
+        assert_end!(stream);
+
+        // Test sending a message that doesn't have a newline in it.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAN\n");
+        assert_ping!(stream);
+        stream.send(Message::Text("O: 1yo!".into())).await.expect("failed to send");
+        assert_end!(stream);
+
+        // Test sending a message without a space in it.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAO\n");
+        assert_ping!(stream);
+        stream.send(Message::Text("S:\n".into())).await.expect("failed to send");
+        assert_end!(stream);
+
+        // Test sending a message with an invalid command.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAP\n");
+        assert_ping!(stream);
+        stream.send(Message::Text("X: 2\nwhy".into())).await.expect("failed to send");
+        assert_end!(stream);
+
+        // Test sending a message with a PlayerID that is not an integer.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAQ\n");
+        assert_ping!(stream);
+        stream.send(Message::Text("A: dave\nhi!".into())).await.expect("failed to send");
+        assert_end!(stream);
+
+        // Test sending a message with a PlayerID that is blank.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAR\n");
+        assert_ping!(stream);
+        stream.send(Message::Text("O: \nwhut".into())).await.expect("failed to send");
+        assert_end!(stream);
+
+        // Test sending a message with a PlayerID that is negative.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAS\n");
+        assert_ping!(stream);
+        stream.send(Message::Text("C: -7\nuh oh".into())).await.expect("failed to send");
+        assert_end!(stream);
+
+        // Test sending a message with a PlayerID that is too big.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAT\n");
+        assert_ping!(stream);
+        stream.send(Message::Text("O: 4294967296\n>u32".into())).await.expect("failed to send");
+        assert_end!(stream);
+
+        // Test sending a seal request with a payload.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAU\n");
+        assert_ping!(stream);
+        stream.send(Message::Text("S: \npayload!".into())).await.expect("failed to send");
+        assert_end!(stream);
+
+        // Test sending a WebRTC message without a payload.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAV\n");
+        assert_ping!(stream);
+        stream.send(Message::Text("C: 20\n".into())).await.expect("failed to send");
+        assert_end!(stream);
+
+        // Test sending a WebRTC message with a payload that is slightly too big.
+        let slightly_too_long = format!("A: 4294967295\n{}", "*".repeat(16777203));
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAW\n");
+        assert_ping!(stream);
+        stream.send(Message::Text(slightly_too_long)).await
+                .expect_err("message should not have been received");
+        assert_end!(stream);
+
+        // Test creating a room while already in a room.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAX\n");
+        assert_ping!(stream);
+        stream.send(Message::Text("J: \n".into())).await.expect("failed to send");
+        assert_end!(stream);
+
+        // Test joining a room while already in a room.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAY\n");
+        assert_ping!(stream);
+        stream.send(Message::Text("J: BEAN\n".into())).await.expect("failed to send");
+        assert_end!(stream);
+
+        // Test valid requests.
+        let mut stream = crate::client_setup!(10002);
+        assert_msg!(stream, "I: 1\n");
+        assert_msg!(stream, "J: AAAZ\n");
+        assert_ping!(stream);
+        stream.send(Message::Text("S: \n".into())).await.expect("failed to send");
+        // NOTE: 0 is an invalid PlayerID, but the room checks this.
+        stream.send(Message::Text("O: 0\n\\o/".into())).await.expect("failed to send");
+        stream.send(Message::Text("A: 4294967295\nboi".into())).await.expect("failed to send");
+        stream.send(Message::Text("C: 1\ndone!".into())).await.expect("failed to send");
+        stream.close(None).await.expect("failed to send close message");
+        assert_end!(stream);
 
         handle.await.expect("server was aborted");
     }
