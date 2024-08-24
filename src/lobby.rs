@@ -25,6 +25,7 @@ use crate::close_code::CustomCloseCode;
 use crate::config::VariableConfig;
 use crate::message::LobbyCommand;
 use crate::player::*;
+use crate::player::joining::*;
 
 use core::net::IpAddr;
 use nohash_hasher::IntMap;
