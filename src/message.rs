@@ -115,7 +115,7 @@ pub struct RoomRequest {
 }
 
 /// A notification from a room, to any given player.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RoomNotification {
     /// A new player with the given ID has joined the room.
     PlayerJoined(u32),
