@@ -76,9 +76,7 @@ pub enum CustomCloseCode {
     /// The message that was given contained an invalid command.
     InvalidCommand,
 
-    /// The maximum number of players has been reached.
-    ///
-    /// **NOTE:** This close code is now redundant.
+    /// The maximum number of players within a room has been reached.
     TooManyPlayers,
 
     /// A binary message was received when only text messages are allowed.

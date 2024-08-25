@@ -159,3 +159,29 @@ impl fmt::Display for RoomNotification {
         }
     }
 }
+
+/// A series of control messages that can be sent from rooms to the lobby.
+#[derive(Debug)]
+pub enum LobbyControl {
+    /// The given room is now sealed.
+    ///
+    /// This means that the room's task is still technically active, but it is
+    /// in the process of closing, and that new players should be stopped from
+    /// joining the room.
+    SealRoom(RoomCode),
+
+    /// The given room is closed.
+    ///
+    /// This means the room's task has ended, and that the room should be
+    /// removed from the lobby to save system memory.
+    CloseRoom(RoomCode),
+}
+
+impl fmt::Display for LobbyControl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SealRoom(room_code) => write!(f, "seal room {}", room_code),
+            Self::CloseRoom(room_code) => write!(f, "close room {}", room_code),
+        }
+    }
+}

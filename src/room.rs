@@ -23,7 +23,7 @@ SOFTWARE.
 
 use crate::close_code::{CloseCode, CustomCloseCode};
 use crate::config::VariableConfig;
-use crate::message::{RoomCommand, RoomNotification, RoomRequest};
+use crate::message::{LobbyControl, RoomCommand, RoomNotification, RoomRequest};
 use crate::player::in_room::{PlayerInRoom, PlayerInRoomContext};
 use crate::player::*;
 use crate::room_code::RoomCode;
@@ -60,6 +60,12 @@ pub struct RoomContext {
 
     /// The WebSocket stream for the host of the room.
     pub host_stream: PlayerStream,
+
+    /// A channel for the lobby to send new clients to join the room.
+    pub new_client_receiver: mpsc::Receiver<PlayerStream>,
+
+    /// A channel for the room to send control messages to the lobby.
+    pub lobby_control_sender: mpsc::Sender<LobbyControl>,
 
     /// A watch channel for the server configuration.
     pub config_receiver: watch::Receiver<VariableConfig>,
@@ -123,8 +129,8 @@ impl Room {
             HOST_ID,
             context.host_stream,
             &mut player_map,
-            player_request_sender,
-            player_close_sender,
+            player_request_sender.clone(),
+            player_close_sender.clone(),
             context.config_receiver.clone(),
             context.shutdown_signal.resubscribe(),
         )
@@ -139,7 +145,46 @@ impl Room {
 
         loop {
             tokio::select! {
-                // TODO: Allow new players to enter the room.
+                res = context.new_client_receiver.recv() => match res {
+                    Some(client_stream) => {
+                        trace!("received new client from lobby");
+
+                        // Check if the room is full first.
+                        if player_map.len() < max_players_per_room {
+                            // Make a new PlayerID for this client, that doesn't
+                            // already exist in the room.
+                            let mut player_id = Self::random_player_id();
+                            while player_map.contains_key(&player_id) {
+                                player_id = Self::random_player_id();
+                            }
+
+                            info!(player_id, "player joining");
+                            Self::on_connect(
+                                context.room_code,
+                                player_id,
+                                client_stream,
+                                &mut player_map,
+                                player_request_sender.clone(),
+                                player_close_sender.clone(),
+                                context.config_receiver.clone(),
+                                context.shutdown_signal.resubscribe()
+                            )
+                            .await;
+                        } else {
+                            warn!("room is full, closing connection");
+                            close_task_tracker.spawn(send_close(SendCloseContext {
+                                client_stream,
+                                close_code: CustomCloseCode::TooManyPlayers.into(),
+                                client_id: None,
+                            }));
+                        }
+                    },
+                    None => {
+                        // If we get here, this means the lobby is gone.
+                        error!("new client sender dropped");
+                        break;
+                    }
+                },
 
                 res = player_request_receiver.recv() => match res {
                     Some(request) => {
@@ -273,14 +318,52 @@ impl Room {
             }
         }
 
-        // TODO: Send seal signal, but only if we are about to wait for
-        // connections to close.
-        // TODO: If clients are still waiting to join the room, spawn a close
-        // task for them to let them know the room is now sealed.
+        // Let the lobby know that the lobby is now sealed, meaning that it
+        // should not allow any more clients to join the room.
+        trace!("sending seal signal to the lobby");
+        let control = LobbyControl::SealRoom(context.room_code);
+        if let Err(e) = context.lobby_control_sender.send(control).await {
+            error!(error = %e, "failed to send seal signal to the lobby");
+        }
 
-        // We may still be waiting to either send close codes to, or receive
-        // echoes from, clients that are disconnecting. Let those complete
-        // before dropping the connections.
+        // If there are any player tasks left, for example if we received the
+        // shutdown signal, then we should wait for them to close gracefully.
+        trace!("waiting for remaining player tasks to finish");
+        for (player_id, (mut player_task, _)) in player_map.drain() {
+            if let Err(e) = player_task.handle().await {
+                error!(player_id, error = %e, "player task did not finish");
+            }
+            debug!(player_id, "player task finished");
+        }
+
+        // It's possible that a client was sent to us by the lobby just before
+        // we sent the seal signal - if that's the case, we want to spawn a task
+        // to send them a close code saying that the room has been sealed.
+        trace!("checking for joining clients that we did not process");
+        loop {
+            match context.new_client_receiver.try_recv() {
+                Ok(client_stream) => {
+                    trace!("spawning close task for joining client");
+                    close_task_tracker.spawn(send_close(SendCloseContext {
+                        client_stream,
+                        close_code: CustomCloseCode::RoomSealed.into(),
+                        client_id: None,
+                    }));
+                }
+                Err(e) => match e {
+                    TryRecvError::Empty => {
+                        trace!("no more joining clients to account for");
+                        break;
+                    }
+                    TryRecvError::Disconnected => {
+                        error!("new client sender dropped");
+                        break;
+                    }
+                },
+            }
+        }
+
+        // Wait for all remaining close tasks to finish.
         if !close_task_tracker.is_empty() {
             info!(
                 num_tasks = close_task_tracker.len(),
@@ -290,7 +373,13 @@ impl Room {
         close_task_tracker.close();
         close_task_tracker.wait().await;
 
-        // TODO: Send close signal to lobby.
+        // Send a closed signal to the lobby, now that we are really, actually,
+        // for-realsies done here.
+        trace!("sending close signal to the lobby");
+        let control = LobbyControl::CloseRoom(context.room_code);
+        if let Err(e) = context.lobby_control_sender.send(control).await {
+            error!(error = %e, "failed to send close signal to the lobby");
+        }
 
         info!("closed");
     }
@@ -575,6 +664,11 @@ impl Room {
                 warn!(player_id, "vacant entry in player map, ignoring");
             }
         }
+    }
+
+    /// Generate a random [`PlayerID`] for a non-host player.
+    fn random_player_id() -> PlayerID {
+        fastrand::u32(2..)
     }
 }
 
