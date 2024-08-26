@@ -32,6 +32,7 @@ use nohash_hasher::IntMap;
 use std::collections::hash_map::Entry;
 use std::fmt;
 use std::mem::drop;
+use tokio::sync::broadcast::error::SendError;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
@@ -52,7 +53,7 @@ const ROOM_NOTIFICATION_CAPACITY: usize = 50;
 /// A type which keeps track of the players within a room, with the [`PlayerID`]
 /// as the key, and the values being the [`PlayerInRoom`] instance, along with
 /// a [`RoomNotification`] sender.
-type PlayerMap = IntMap<PlayerID, (PlayerInRoom, broadcast::Sender<RoomNotification>)>;
+type PlayerMap = IntMap<PlayerID, PlayerTask>;
 
 /// The data required to spawn a [`Room`] instance.
 pub struct RoomContext {
@@ -321,10 +322,10 @@ impl Room {
                             .filter(|(&id, _)| id != HOST_ID)
                             .take(num_to_kick);
 
-                        for (player_id, (_, notification_sender)) in kick_iter {
+                        for (player_id, player_task) in kick_iter {
                             warn!(player_id, "kicking player");
                             let noti = RoomNotification::Error(CustomCloseCode::TooManyPlayers.into());
-                            if let Err(e) = notification_sender.send(noti) {
+                            if let Err(e) = player_task.send_notification(noti) {
                                 error!(player_id, error = %e,
                                     "failed to send close notification to player");
                             }
@@ -377,7 +378,7 @@ impl Room {
         // If there are any player tasks left, for example if we received the
         // shutdown signal, then we should wait for them to close gracefully.
         trace!("waiting for remaining player tasks to finish");
-        for (player_id, (mut player_task, _)) in player_map.drain() {
+        for (player_id, mut player_task) in player_map.drain() {
             if let Err(e) = player_task.handle().await {
                 error!(player_id, error = %e, "player task did not finish");
             }
@@ -447,8 +448,8 @@ impl Room {
         player_map: &mut PlayerMap,
     ) {
         debug!(sender_id, receiver_id, %message_type, "attempting to send message");
-        if let Some((_, sender_notifications)) = player_map.get(&sender_id) {
-            if let Some((_, receiver_notifications)) = player_map.get(&receiver_id) {
+        if let Some(sender_task) = player_map.get(&sender_id) {
+            if let Some(receiver_task) = player_map.get(&receiver_id) {
                 let message = match message_type {
                     MessageType::Offer => {
                         RoomNotification::OfferReceived(sender_id, message_payload)
@@ -462,7 +463,7 @@ impl Room {
                 };
 
                 info!(receiver_id, %message, "sending message");
-                if let Err(e) = receiver_notifications.send(message) {
+                if let Err(e) = receiver_task.send_notification(message) {
                     error!(receiver_id, error = %e, "failed to send message to receiver");
                 }
             } else {
@@ -473,7 +474,7 @@ impl Room {
 
                 let err = RoomNotification::Error(CustomCloseCode::InvalidDestination.into());
                 trace!("sending close notification to sender");
-                if let Err(e) = sender_notifications.send(err) {
+                if let Err(e) = sender_task.send_notification(err) {
                     error!(sender_id, error = %e, "failed to send close notification to sender");
                 }
             }
@@ -515,7 +516,7 @@ impl Room {
         } else {
             // Attempt to send a close notification to the player that requested
             // to seal the room.
-            if let Some((_, notification_sender)) = player_map.get(&player_id) {
+            if let Some(player_task) = player_map.get(&player_id) {
                 warn!(
                     player_id,
                     "player attempted to seal room, closing connection"
@@ -523,7 +524,7 @@ impl Room {
 
                 let notification = RoomNotification::Error(CustomCloseCode::OnlyHostCanSeal.into());
                 trace!("sending close notification to player");
-                if let Err(e) = notification_sender.send(notification) {
+                if let Err(e) = player_task.send_notification(notification) {
                     error!(player_id, error = %e, "failed to send close notification to player");
                 }
             } else {
@@ -556,23 +557,24 @@ impl Room {
 
         // Spawn a task for handling the client, and add them to the player map.
         debug!(player_id, "spawning player task");
-        let player_task = PlayerInRoom::spawn(PlayerInRoomContext {
-            client_stream: player_stream,
-            room_code,
-            player_id,
-            other_ids: player_map.keys().map(|&id| id).collect(),
-            room_request_sender: request_sender,
-            room_close_sender: close_sender,
-            room_notification_receiver: notification_receiver,
-            config_receiver,
-            shutdown_signal,
-        });
+        let player_task = PlayerTask::new(
+            PlayerInRoomContext {
+                client_stream: player_stream,
+                room_code,
+                player_id,
+                other_ids: player_map.keys().map(|&id| id).collect(),
+                room_request_sender: request_sender,
+                room_close_sender: close_sender,
+                room_notification_receiver: notification_receiver,
+                config_receiver,
+                shutdown_signal,
+            },
+            notification_sender,
+        );
 
         // If there was already a player with the given ID, log an error and
         // forcefully abort the replaced task.
-        if let Some((mut replaced_task, _)) =
-            player_map.insert(player_id, (player_task, notification_sender))
-        {
+        if let Some(mut replaced_task) = player_map.insert(player_id, player_task) {
             error!(player_id, "id already exists in room, aborting old task");
             replaced_task.handle().abort();
         }
@@ -591,7 +593,7 @@ impl Room {
     ) {
         debug!(player_id, "player is disconnecting, removing from room");
 
-        if let Some((mut player_task, _)) = player_map.remove(&player_id) {
+        if let Some(mut player_task) = player_map.remove(&player_id) {
             trace!("waiting for player handle to finish");
 
             // Usually, we would need to make sure that the request and close
@@ -652,9 +654,9 @@ impl Room {
         // await map. This way, we can keep track of which tasks have been
         // closed, and which ones are still active.
         trace!("sending close notifications");
-        for (player_id, (mut player_task, notification_sender)) in player_map.drain() {
+        for (player_id, mut player_task) in player_map.drain() {
             debug!(player_id, "sending close notification to player");
-            match notification_sender.send(notification.clone()) {
+            match player_task.send_notification(notification.clone()) {
                 Ok(_) => {
                     trace!("adding player task to await map");
                     match to_await.insert(player_id, player_task) {
@@ -772,17 +774,17 @@ impl Room {
         let player_id_list = player_map.keys().map(|&id| id).collect::<Vec<PlayerID>>();
         for player_id in player_id_list {
             if let Entry::Occupied(entry) = player_map.entry(player_id) {
-                let (_, notification_sender) = entry.get();
+                let player_task = entry.get();
 
                 debug!(player_id, %notification, "sending notification to player");
-                if let Err(e) = notification_sender.send(notification.clone()) {
+                if let Err(e) = player_task.send_notification(notification.clone()) {
                     error!(player_id, error = %e, "failed to send notification to player");
 
                     // Since the receiver has been dropped, we can assume that
                     // the task has failed somehow. So we need to kill it.
                     // For being a failure.
                     trace!("aborting player task");
-                    let (mut player_task, _) = entry.remove();
+                    let mut player_task = entry.remove();
                     player_task.handle().abort();
                 }
             } else {
@@ -794,6 +796,50 @@ impl Room {
     /// Generate a random [`PlayerID`] for a non-host player.
     fn random_player_id() -> PlayerID {
         fastrand::u32(2..)
+    }
+}
+
+/// A wrapper around the [`PlayerInRoom`] task, with extra metadata.
+#[derive(Debug)]
+struct PlayerTask {
+    /// The task itself, which handles communication with the client.
+    task: PlayerInRoom,
+
+    /// A channel for sending notifications to the task.
+    notification_sender: broadcast::Sender<RoomNotification>,
+}
+
+impl PlayerTask {
+    /// Create a new [`PlayerTask`].
+    ///
+    /// The `context` is needed to spawn the [`PlayerInRoom`] instance, and the
+    /// `notification_sender` allows the room to send notifications to the
+    /// player task, so it can react to events. It must belong to the same
+    /// channel as the receiver provided in `context`.
+    pub fn new(
+        context: PlayerInRoomContext,
+        notification_sender: broadcast::Sender<RoomNotification>,
+    ) -> Self {
+        Self {
+            task: PlayerInRoom::spawn(context),
+            notification_sender,
+        }
+    }
+
+    /// Get a mutable reference to the task's handle, which can be used to
+    /// either await the task's completion, or to abort the task.
+    pub fn handle(&mut self) -> &mut JoinHandle<()> {
+        self.task.handle()
+    }
+
+    /// Send a [`RoomNotification`] to the player's task.
+    pub fn send_notification(
+        &self,
+        notification: RoomNotification,
+    ) -> Result<(), SendError<RoomNotification>> {
+        // We don't need to know how many receivers the channel has, since we
+        // know the answer will always be one.
+        self.notification_sender.send(notification).map(|_| ())
     }
 }
 

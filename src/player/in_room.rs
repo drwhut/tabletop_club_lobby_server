@@ -88,6 +88,7 @@ pub struct PlayerInRoomContext {
 /// to establish a peer-to-peer connection with the other players or not. As of
 /// Tabletop Club v0.2.0, the host of the room is the one that initiates the
 /// process of establishing connections with incoming clients.
+#[derive(Debug)]
 pub struct PlayerInRoom {
     handle: JoinHandle<()>,
 }
