@@ -31,6 +31,7 @@ use crate::room_code::RoomCode;
 use nohash_hasher::IntMap;
 use std::collections::hash_map::Entry;
 use std::fmt;
+use std::mem::drop;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
@@ -45,13 +46,13 @@ pub const HOST_ID: PlayerID = 1;
 const PLAYER_REQUEST_BUFFER_SIZE: usize = 10;
 
 /// The number of [`RoomNotification`]s that can be sent to players before the
-/// room would need to wait for the buffer to be read.
-const ROOM_NOTIFICATION_BUFFER_SIZE: usize = 5;
+/// task needs to read them, at the risk of lagging and missing one.
+const ROOM_NOTIFICATION_CAPACITY: usize = 50;
 
 /// A type which keeps track of the players within a room, with the [`PlayerID`]
 /// as the key, and the values being the [`PlayerInRoom`] instance, along with
 /// a [`RoomNotification`] sender.
-type PlayerMap = IntMap<PlayerID, (PlayerInRoom, mpsc::Sender<RoomNotification>)>;
+type PlayerMap = IntMap<PlayerID, (PlayerInRoom, broadcast::Sender<RoomNotification>)>;
 
 /// The data required to spawn a [`Room`] instance.
 pub struct RoomContext {
@@ -199,6 +200,7 @@ impl Room {
                                     request.player_id,
                                     context.room_code,
                                     &mut player_map,
+                                    &mut player_request_receiver,
                                     &mut player_close_receiver,
                                     &mut close_task_tracker
                                 )
@@ -242,6 +244,7 @@ impl Room {
                                         RoomNotification::HostLeft,
                                         context.room_code,
                                         &mut player_map,
+                                        &mut player_request_receiver,
                                         &mut player_close_receiver,
                                         &mut close_task_tracker
                                     )
@@ -275,6 +278,7 @@ impl Room {
                                 RoomNotification::HostLeft,
                                 context.room_code,
                                 &mut player_map,
+                                &mut player_request_receiver,
                                 &mut player_close_receiver,
                                 &mut close_task_tracker
                             )
@@ -324,6 +328,31 @@ impl Room {
         let control = LobbyControl::SealRoom(context.room_code);
         if let Err(e) = context.lobby_control_sender.send(control).await {
             error!(error = %e, "failed to send seal signal to the lobby");
+        }
+
+        // Before we wait for the player tasks to finish, we need to make sure
+        // that the receivers for requests and closes are empty - this is to
+        // ensure that the tasks are not stuck waiting to send requests, and
+        // that ultimately we won't hang trying to await the handles.
+
+        // By dropping the room's senders, the only senders left should be the
+        // ones in the tasks. This way, we are guaranteed to get a `None` come
+        // through at some point.
+        drop(player_close_sender);
+        drop(player_request_sender);
+
+        trace!("making sure close channel is empty");
+        loop {
+            if player_close_receiver.recv().await.is_none() {
+                break;
+            }
+        }
+
+        trace!("making sure request channel is empty");
+        loop {
+            if player_request_receiver.recv().await.is_none() {
+                break;
+            }
         }
 
         // If there are any player tasks left, for example if we received the
@@ -414,7 +443,7 @@ impl Room {
                 };
 
                 info!(receiver_id, %message, "sending message");
-                if let Err(e) = receiver_notifications.send(message).await {
+                if let Err(e) = receiver_notifications.send(message) {
                     error!(receiver_id, error = %e, "failed to send message to receiver");
                 }
             } else {
@@ -425,7 +454,7 @@ impl Room {
 
                 let err = RoomNotification::Error(CustomCloseCode::InvalidDestination.into());
                 trace!("sending close notification to sender");
-                if let Err(e) = sender_notifications.send(err).await {
+                if let Err(e) = sender_notifications.send(err) {
                     error!(sender_id, error = %e, "failed to send close notification to sender");
                 }
             }
@@ -445,6 +474,7 @@ impl Room {
         player_id: PlayerID,
         room_code: RoomCode,
         player_map: &mut PlayerMap,
+        request_receiver: &mut mpsc::Receiver<RoomRequest>,
         close_receiver: &mut mpsc::Receiver<(PlayerID, PlayerStream, CloseCode)>,
         close_task_tracker: &mut TaskTracker,
     ) -> bool {
@@ -456,6 +486,7 @@ impl Room {
                 RoomNotification::RoomSealed,
                 room_code,
                 player_map,
+                request_receiver,
                 close_receiver,
                 close_task_tracker,
             )
@@ -473,7 +504,7 @@ impl Room {
 
                 let notification = RoomNotification::Error(CustomCloseCode::OnlyHostCanSeal.into());
                 trace!("sending close notification to player");
-                if let Err(e) = notification_sender.send(notification).await {
+                if let Err(e) = notification_sender.send(notification) {
                     error!(player_id, error = %e, "failed to send close notification to player");
                 }
             } else {
@@ -502,7 +533,7 @@ impl Room {
 
         // Create a notification channel for this player specifically.
         let (notification_sender, notification_receiver) =
-            mpsc::channel(ROOM_NOTIFICATION_BUFFER_SIZE);
+            broadcast::channel(ROOM_NOTIFICATION_CAPACITY);
 
         // Spawn a task for handling the client, and add them to the player map.
         debug!(player_id, "spawning player task");
@@ -543,6 +574,14 @@ impl Room {
 
         if let Some((mut player_task, _)) = player_map.remove(&player_id) {
             trace!("waiting for player handle to finish");
+
+            // Usually, we would need to make sure that the request and close
+            // channels are empty before waiting for the task to finish, to
+            // ensure that the task won't hang while waiting to send a request.
+            // However, we can make an exception here, as this function should
+            // be called as a result of one of these requests being received,
+            // and that the task should have broken out of it's main loop after
+            // sending the request.
             if let Err(e) = player_task.handle().await {
                 error!(player_id, error = %e, "player task did not finish");
             }
@@ -581,58 +620,125 @@ impl Room {
         notification: RoomNotification,
         room_code: RoomCode,
         player_map: &mut PlayerMap,
+        request_receiver: &mut mpsc::Receiver<RoomRequest>,
         close_receiver: &mut mpsc::Receiver<(PlayerID, PlayerStream, CloseCode)>,
         close_task_tracker: &mut TaskTracker,
     ) {
-        info!(%notification, "room is closing");
+        info!(%notification, "closing");
 
+        // Keep track of which player tasks we still need to await.
+        let mut to_await = IntMap::default();
+
+        // Remove all of the players from the player map, and add them to the
+        // await map. This way, we can keep track of which tasks have been
+        // closed, and which ones are still active.
+        trace!("sending close notifications");
         for (player_id, (mut player_task, notification_sender)) in player_map.drain() {
             debug!(player_id, "sending close notification to player");
-            if let Err(e) = notification_sender.send(notification.clone()).await {
-                // Not the end of the world if we can't send the notification,
-                // as the player task might have already sent a close or drop
-                // request before ending.
-                warn!(player_id, error = %e, "failed to send close notification to player");
-            }
-
-            trace!("waiting for player task to finish");
-            if let Err(e) = player_task.handle().await {
-                error!(player_id, error = %e, "player task did not finish");
+            match notification_sender.send(notification.clone()) {
+                Ok(_) => {
+                    trace!("adding player task to await map");
+                    match to_await.insert(player_id, player_task) {
+                        Some(mut task) => {
+                            // This should not happen, but if it does abort the
+                            // old task.
+                            error!(player_id, "player task already in await map");
+                            task.handle().abort();
+                        }
+                        None => {}
+                    }
+                }
+                Err(_) => {
+                    // If the notification failed to send, that can only mean
+                    // that the receiver was dropped, which means that the
+                    // player task ended early - therefore, we're safe to await
+                    // the task now.
+                    // NOTE: It's worth pointing out in the rare case that the
+                    // receiver has lagged behind and missed notifications, then
+                    // they will have sent a close request with an error close
+                    // code anyway, so we can proceed as normal.
+                    warn!(player_id, "notification receiver dropped, waiting to close");
+                    if let Err(e) = player_task.handle().await {
+                        error!(player_id, error = %e, "player task did not finish");
+                    }
+                }
             }
         }
 
-        // Before we started closing all the player tasks, there may have
-        // already been close and drop requests from those tasks. So, we'll just
-        // go through all of the close requests until the channel is empty, and
-        // leave drop requests to, well, drop.
-        trace!("spawning close tasks");
-        loop {
-            match close_receiver.try_recv() {
-                Ok((player_id, client_stream, close_code)) => {
-                    debug!(player_id, "spawning close task for player");
-                    close_task_tracker.spawn(send_close(SendCloseContext {
-                        client_stream,
-                        close_code,
-                        client_id: Some(ClientUniqueID::HasJoined {
-                            room_code,
-                            player_id,
-                        }),
-                    }));
-                }
-                Err(e) => match e {
-                    TryRecvError::Empty => {
-                        // We've gone through them all!
-                        trace!("close request channel cleared");
+        // Keep track of which clients we need to spawn a close task for.
+        let mut to_close = Vec::new();
+
+        // It's possible that at least one of the player tasks is waiting to
+        // send a request or a close to the room, if either of the channels is
+        // currently full. Because of this, we need to drain the channels and
+        // check through them for close or drop requests.
+        while !to_await.is_empty() {
+            debug!(n = to_await.len(), "waiting for close requests");
+
+            tokio::select! {
+                res = request_receiver.recv() => match res {
+                    Some(request) => match request.command {
+                        RoomCommand::DropConnection => {
+                            let player_id = request.player_id;
+                            debug!(player_id, "received drop request");
+
+                            if let Some(mut player_task) = to_await.remove(&player_id) {
+                                trace!("waiting for player task to close");
+                                if let Err(e) = player_task.handle().await {
+                                    error!(player_id, error = %e, "player task did not finish");
+                                }
+                            } else {
+                                warn!(player_id, "player task was not in await map, ignoring");
+                            }
+                        },
+
+                        // Ignore all other requests at this stage.
+                        _ => {}
+                    },
+                    None => {
+                        error!("all player request senders dropped");
                         break;
-                    }
-                    TryRecvError::Disconnected => {
-                        // This shouldn't happen, as there should be at least
-                        // one sender left in the room itself.
+                    },
+                },
+
+                res = close_receiver.recv() => match res {
+                    Some(close_req) => {
+                        let player_id = close_req.0;
+                        debug!(player_id, close_code = %close_req.2,
+                            "received close request");
+                        to_close.push(close_req);
+
+                        if let Some(mut player_task) = to_await.remove(&player_id) {
+                            trace!("waiting for player task to close");
+                            if let Err(e) = player_task.handle().await {
+                                error!(player_id, error = %e, "player task did not finish");
+                            }
+                        } else {
+                            warn!(player_id, "player task was not in await map, ignoring");
+                        }
+                    },
+                    None => {
                         error!("all close request senders dropped");
                         break;
-                    }
-                },
+                    },
+                }
             }
+        }
+
+        // Now that all of the player tasks have been closed, we need to spawn
+        // close tasks for the clients that we need to send a close code to,
+        // and wait for an echo from.
+        trace!("spawning close tasks");
+        for (player_id, client_stream, close_code) in to_close {
+            debug!(player_id, %close_code, "spawning close task for player");
+            close_task_tracker.spawn(send_close(SendCloseContext {
+                client_stream,
+                close_code,
+                client_id: Some(ClientUniqueID::HasJoined {
+                    room_code,
+                    player_id,
+                }),
+            }));
         }
     }
 
@@ -650,7 +756,7 @@ impl Room {
                 let (_, notification_sender) = entry.get();
 
                 debug!(player_id, %notification, "sending notification to player");
-                if let Err(e) = notification_sender.send(notification.clone()).await {
+                if let Err(e) = notification_sender.send(notification.clone()) {
                     error!(player_id, error = %e, "failed to send notification to player");
 
                     // Since the receiver has been dropped, we can assume that

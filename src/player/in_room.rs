@@ -30,6 +30,7 @@ use crate::room_code::RoomCode;
 
 use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
@@ -61,7 +62,13 @@ pub struct PlayerInRoomContext {
     pub room_close_sender: mpsc::Sender<(PlayerID, PlayerStream, CloseCode)>,
 
     /// A channel for receiving notifications from the room.
-    pub room_notification_receiver: mpsc::Receiver<RoomNotification>,
+    ///
+    /// **NOTE:** This is a [`broadcast`] channel and not a [`mpsc`] channel,
+    /// since we already use [`mpsc::Sender`]s to send requests to the room.
+    /// If we also use a [`mpsc::Receiver`] to receive notifications, then we
+    /// run the risk of a hang, where the player is waiting to send requests,
+    /// at the same time as the room waiting to send a notification.
+    pub room_notification_receiver: broadcast::Receiver<RoomNotification>,
 
     /// A watch channel for the server configuration.
     pub config_receiver: watch::Receiver<VariableConfig>,
@@ -331,7 +338,7 @@ impl PlayerInRoom {
                 },
 
                 res = context.room_notification_receiver.recv() => match res {
-                    Some(notification) => {
+                    Ok(notification) => {
                         debug!(%notification, "received notification from room");
                         match notification {
                             RoomNotification::PlayerJoined(id) => {
@@ -378,11 +385,23 @@ impl PlayerInRoom {
                             },
                         }
                     },
-                    None => {
-                        // If the sender got dropped, that means the room task
-                        // no longer exists, which means - we're boned.
-                        error!("room notification sender dropped");
-                        return;
+                    Err(e) => match e {
+                        RecvError::Closed => {
+                            // If the sender was dropped, that means that the
+                            // room task no longer exists, which means that
+                            // everything is fine, I'm fine, nothing is going
+                            // wrong oh god what's happening AAAAAAA O.O
+                            error!("room notification sender dropped");
+                            break;
+                        },
+                        RecvError::Lagged(skipped) => {
+                            // This means that we didn't read enough of the
+                            // notifications in time, and that we missed at
+                            // least one.
+                            error!(skipped, "task lagged, missed room notifications");
+                            close_connection!(context, CloseCode::Error);
+                            break;
+                        },
                     }
                 },
 
@@ -446,7 +465,7 @@ mod tests {
         stream: PlayerStream,
         index: u32,
         shutdown: broadcast::Receiver<()>,
-    ) -> Result<(), mpsc::error::SendError<RoomNotification>> {
+    ) -> Result<(), broadcast::error::SendError<RoomNotification>> {
         let room_code_int = ((65 << 24) | (65 << 16) | (65 << 8) | (65 << 0)) + (index % 26);
         let room_code: RoomCode = room_code_int.try_into().unwrap();
 
@@ -467,7 +486,9 @@ mod tests {
 
         let (room_request_sender, mut room_request_receiver) = mpsc::channel(1);
         let (room_close_sender, mut room_close_receiver) = mpsc::channel(1);
-        let (room_notification_sender, room_notification_receiver) = mpsc::channel(1);
+
+        // Give just enough capacity so we don't get send errors.
+        let (room_notification_sender, room_notification_receiver) = broadcast::channel(15);
 
         let mut config = VariableConfig::default();
         config.ping_interval_secs = 2;
@@ -493,15 +514,15 @@ mod tests {
                 // correct number of pings are being sent inbetween messages.
                 sleep(Duration::from_millis(500)).await;
                 let noti = RoomNotification::PlayerJoined(500);
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
 
                 sleep(Duration::from_secs(5)).await;
                 let noti = RoomNotification::PlayerJoined(5);
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
 
                 sleep(Duration::from_secs(4)).await;
                 let noti = RoomNotification::PlayerJoined(9);
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
             }
             1 => {
                 // Wait a bit for the initial ping to be sent, then update the
@@ -510,7 +531,7 @@ mod tests {
                 // through.
                 sleep(Duration::from_millis(250)).await;
                 let noti = RoomNotification::PlayerJoined(250);
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
 
                 sleep(Duration::from_millis(250)).await;
                 config.ping_interval_secs = 1;
@@ -519,7 +540,7 @@ mod tests {
 
                 sleep(Duration::from_millis(6250)).await;
                 let noti = RoomNotification::PlayerJoined(6750);
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
             }
             5 => {
                 sleep(Duration::from_millis(500)).await;
@@ -530,60 +551,60 @@ mod tests {
                 // change in the future. It's also the room's responsibility to
                 // make sure player IDs are valid.
                 let noti = RoomNotification::PlayerJoined(0);
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
 
                 let noti = RoomNotification::PlayerJoined(145265);
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
 
                 let noti = RoomNotification::PlayerJoined(std::u32::MAX);
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
 
                 // Again, this would be invalid in a real senario, but it's the
                 // room's responsibility to send valid notifications.
                 let noti = RoomNotification::PlayerLeft(1);
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
 
                 let noti = RoomNotification::PlayerLeft(4246273);
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
 
                 let noti = RoomNotification::PlayerLeft(std::u32::MAX);
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
 
                 let noti = RoomNotification::OfferReceived(200, "hello world!".into());
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
 
                 let noti = RoomNotification::OfferReceived(std::u32::MAX, "max integer".into());
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
 
                 let noti = RoomNotification::AnswerReceived(1000, "lol\n2nd line!".into());
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
 
                 // Send a message just under the payload limit of 16 MiB.
                 let long = "?".repeat(16777211);
                 let noti = RoomNotification::CandidateReceived(1, long);
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
 
                 // If the host left, the task should stop and send back a close
                 // request.
-                room_notification_sender
-                    .send(RoomNotification::HostLeft)
-                    .await?;
+                room_notification_sender.send(RoomNotification::HostLeft)?;
             }
             6 => {
                 sleep(Duration::from_millis(500)).await;
-                room_notification_sender
-                    .send(RoomNotification::RoomSealed)
-                    .await?;
+                room_notification_sender.send(RoomNotification::RoomSealed)?;
             }
             7 => {
                 sleep(Duration::from_millis(500)).await;
                 let noti = RoomNotification::Error(CloseCode::Abnormal);
-                room_notification_sender.send(noti).await?;
+                room_notification_sender.send(noti)?;
             }
             8 => {
+                // Send so many notifications that the receiver lags behind.
+                // This should get the task to send a close request.
                 sleep(Duration::from_millis(500)).await;
-                let noti = RoomNotification::Error(CustomCloseCode::InvalidCommand.into());
-                room_notification_sender.send(noti).await?;
+                for index in 0..20 {
+                    let noti = RoomNotification::PlayerJoined(4096 + index);
+                    room_notification_sender.send(noti)?;
+                }
             }
             25 => {
                 // A series of valid requests should come through here.
@@ -660,7 +681,7 @@ mod tests {
             5 => Some((1, CustomCloseCode::HostDisconnected.into())),
             6 => Some((1, CustomCloseCode::RoomSealed.into())),
             7 => Some((1, CloseCode::Abnormal)),
-            8 => Some((2048, CustomCloseCode::InvalidCommand.into())),
+            8 => Some((2048, CloseCode::Error)),
             9 => Some((1, CloseCode::Invalid)),
             10 => Some((1, CloseCode::Unsupported)),
             13 => Some((1, CustomCloseCode::InvalidFormat.into())),
