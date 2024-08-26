@@ -117,7 +117,8 @@ impl Room {
         // updated later.
         let starting_config = *context.config_receiver.borrow_and_update();
         let mut max_players_per_room = starting_config.max_players_per_room;
-        debug!(max_players_per_room, "read config");
+        let mut max_message_count = starting_config.max_message_count;
+        debug!(max_players_per_room, max_message_count, "read config");
 
         // Create channels for players to send us requests and closes.
         let (player_request_sender, mut player_request_receiver) =
@@ -215,6 +216,7 @@ impl Room {
                                     to_id,
                                     MessageType::Offer,
                                     payload,
+                                    max_message_count,
                                     &mut player_map
                                 )
                                 .await;
@@ -225,6 +227,7 @@ impl Room {
                                     to_id,
                                     MessageType::Answer,
                                     payload,
+                                    max_message_count,
                                     &mut player_map
                                 )
                                 .await;
@@ -235,6 +238,7 @@ impl Room {
                                     to_id,
                                     MessageType::Candidate,
                                     payload,
+                                    max_message_count,
                                     &mut player_map
                                 )
                                 .await;
@@ -308,7 +312,8 @@ impl Room {
                 Ok(()) = context.config_receiver.changed() => {
                     let new_config = *context.config_receiver.borrow_and_update();
                     max_players_per_room = new_config.max_players_per_room;
-                    info!(max_players_per_room, "room config updated");
+                    max_message_count = new_config.max_message_count;
+                    info!(max_players_per_room, max_message_count, "room config updated");
 
                     // If the number of players in the room is higher than the
                     // new maximum, then we need to kick players out until the
@@ -445,41 +450,67 @@ impl Room {
         receiver_id: PlayerID,
         message_type: MessageType,
         message_payload: String,
+        max_message_count: usize,
         player_map: &mut PlayerMap,
     ) {
         debug!(sender_id, receiver_id, %message_type, "attempting to send message");
-        if let Some(sender_task) = player_map.get(&sender_id) {
-            if let Some(receiver_task) = player_map.get(&receiver_id) {
-                let message = match message_type {
-                    MessageType::Offer => {
-                        RoomNotification::OfferReceived(sender_id, message_payload)
-                    }
-                    MessageType::Answer => {
-                        RoomNotification::AnswerReceived(sender_id, message_payload)
-                    }
-                    MessageType::Candidate => {
-                        RoomNotification::CandidateReceived(sender_id, message_payload)
-                    }
-                };
 
-                info!(receiver_id, %message, "sending message");
-                if let Err(e) = receiver_task.send_notification(message) {
-                    error!(receiver_id, error = %e, "failed to send message to receiver");
+        let receiver_exists = player_map.contains_key(&receiver_id);
+        let valid = if let Some(sender_task) = player_map.get_mut(&sender_id) {
+            if receiver_exists {
+                // Make sure the sender isn't just spamming messages.
+                let message_count = sender_task.get_message_count(receiver_id);
+                debug!(message_count, "checking number of messages sent so far");
+
+                if message_count < max_message_count {
+                    trace!("incrementing message count");
+                    sender_task.increment_message_count(receiver_id);
+                    true
+                } else {
+                    error!(sender_id, receiver_id, "too many messages sent");
+                    let err = RoomNotification::Error(CloseCode::Policy);
+                    if let Err(e) = sender_task.send_notification(err) {
+                        error!(sender_id, error = %e, "failed to send close notification to sender");
+                    }
+
+                    false
                 }
             } else {
                 error!(
                     sender_id,
                     receiver_id, "cannot send message, receiver does not exist"
                 );
-
                 let err = RoomNotification::Error(CustomCloseCode::InvalidDestination.into());
-                trace!("sending close notification to sender");
                 if let Err(e) = sender_task.send_notification(err) {
                     error!(sender_id, error = %e, "failed to send close notification to sender");
                 }
+
+                false
             }
         } else {
-            warn!(sender_id, "id does not exist in player map, ignoring");
+            warn!(sender_id, "id does not exist, ignoring message request");
+            false
+        };
+
+        if !valid {
+            return;
+        }
+
+        if let Some(receiver_task) = player_map.get(&receiver_id) {
+            let message = match message_type {
+                MessageType::Offer => RoomNotification::OfferReceived(sender_id, message_payload),
+                MessageType::Answer => RoomNotification::AnswerReceived(sender_id, message_payload),
+                MessageType::Candidate => {
+                    RoomNotification::CandidateReceived(sender_id, message_payload)
+                }
+            };
+
+            info!(receiver_id, %message, "sending message");
+            if let Err(e) = receiver_task.send_notification(message) {
+                error!(receiver_id, error = %e, "failed to send message");
+            }
+        } else {
+            error!(receiver_id, "cannot send message, receiver does not exist");
         }
     }
 
@@ -608,6 +639,11 @@ impl Room {
             }
         } else {
             error!(player_id, "cannot remove player, player does not exist");
+        }
+
+        trace!("clearing message counts from all players to disconnecting player");
+        for (_, player_task) in player_map.iter_mut() {
+            player_task.clear_message_count(player_id);
         }
 
         if let Some((close_task_tracker, room_code, client_stream, close_code)) = close {
@@ -807,6 +843,12 @@ struct PlayerTask {
 
     /// A channel for sending notifications to the task.
     notification_sender: broadcast::Sender<RoomNotification>,
+
+    /// For each other player in the room, keep track of how many WebRTC
+    /// messages this player has sent to them. If this number exceeds a maximum
+    /// defined in the server configuration, then their connection should be
+    /// closed.
+    msg_sent: IntMap<PlayerID, usize>,
 }
 
 impl PlayerTask {
@@ -823,6 +865,7 @@ impl PlayerTask {
         Self {
             task: PlayerInRoom::spawn(context),
             notification_sender,
+            msg_sent: IntMap::default(),
         }
     }
 
@@ -840,6 +883,29 @@ impl PlayerTask {
         // We don't need to know how many receivers the channel has, since we
         // know the answer will always be one.
         self.notification_sender.send(notification).map(|_| ())
+    }
+
+    /// Get the number of WebRTC messages this player has sent to the player
+    /// with the given `receiver_id`.
+    pub fn get_message_count(&self, receiver_id: PlayerID) -> usize {
+        match self.msg_sent.get(&receiver_id) {
+            Some(num_messages) => *num_messages,
+            None => 0,
+        }
+    }
+
+    /// Increment the number of WebRTC messages this player has sent to the
+    /// player with the given `receiver_id`. This should be called each time
+    /// a message is sent.
+    pub fn increment_message_count(&mut self, receiver_id: PlayerID) {
+        *self.msg_sent.entry(receiver_id).or_insert(0) += 1;
+    }
+
+    /// Clear the number of WebRTC messages this player has sent to the player
+    /// with the given `receiver_id`. This should be called when the receiver
+    /// has left the room.
+    pub fn clear_message_count(&mut self, receiver_id: PlayerID) {
+        self.msg_sent.remove(&receiver_id);
     }
 }
 
