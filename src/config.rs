@@ -36,7 +36,7 @@ SOFTWARE.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::ops::Range;
+use std::ops::RangeInclusive;
 use std::path::Path;
 use tokio::fs;
 use tokio::sync::{broadcast, watch};
@@ -239,17 +239,17 @@ impl VariableConfig {
 
     /// Check if the values assigned to the current config are valid.
     pub fn validate(&self) -> Result<(), VariableConfigError> {
-        check_range!(self, max_message_size, 100..100_000_000); // 100MB.
-        check_range!(self, max_payload_size, 100..100_000_000);
-        check_range!(self, max_players_per_address, 1..1000);
-        check_range!(self, max_players_per_room, 1..100);
-        check_range!(self, max_rooms, 1..400_000);
-        check_range!(self, player_queue_capacity, 1..10_000);
-        check_range!(self, max_message_count, 5..100);
-        check_range!(self, join_room_time_limit_secs, 1..60);
-        check_range!(self, ping_interval_secs, 1..60);
-        check_range!(self, response_time_limit_secs, 5..120);
-        check_range!(self, reconnect_wait_limit_secs, 0..60);
+        check_range!(self, max_message_size, 100..=100_000_000); // 100MB.
+        check_range!(self, max_payload_size, 100..=100_000_000);
+        check_range!(self, max_players_per_address, 1..=1000);
+        check_range!(self, max_players_per_room, 1..=100);
+        check_range!(self, max_rooms, 1..=400_000);
+        check_range!(self, player_queue_capacity, 1..=10_000);
+        check_range!(self, max_message_count, 5..=100);
+        check_range!(self, join_room_time_limit_secs, 1..=60);
+        check_range!(self, ping_interval_secs, 1..=60);
+        check_range!(self, response_time_limit_secs, 5..=120);
+        check_range!(self, reconnect_wait_limit_secs, 0..=60);
 
         check_lt!(self, max_payload_size, max_message_size);
         check_lt!(self, join_room_time_limit_secs, ping_interval_secs);
@@ -282,7 +282,7 @@ pub enum VariableConfigError {
     OutOfRange {
         key: &'static str,
         value: usize,
-        range: Range<usize>,
+        range: RangeInclusive<usize>,
     },
     GreaterOrEqual {
         key1: &'static str,
@@ -299,8 +299,8 @@ impl fmt::Display for VariableConfigError {
                 f,
                 "value of `{}` is out of range (range: {}-{}, got: {})",
                 key,
-                range.start,
-                range.end - 1,
+                range.start(),
+                range.end(),
                 value
             ),
             Self::GreaterOrEqual {
@@ -459,118 +459,118 @@ reconnect_wait_limit_secs = 5";
         check_replace!(
             "max_message_size = 1100",
             "max_message_size = 10",
-            "value of `max_message_size` is out of range (range: 100-99999999, got: 10)"
+            "value of `max_message_size` is out of range (range: 100-100000000, got: 10)"
         );
         check_replace!(
             "max_message_size = 1100",
             "max_message_size = 500000000",
-            "value of `max_message_size` is out of range (range: 100-99999999, got: 500000000)"
+            "value of `max_message_size` is out of range (range: 100-100000000, got: 500000000)"
         );
 
         check_replace!(
             "max_payload_size = 1000",
             "max_payload_size = 99",
-            "value of `max_payload_size` is out of range (range: 100-99999999, got: 99)"
+            "value of `max_payload_size` is out of range (range: 100-100000000, got: 99)"
         );
         check_replace!(
             "max_payload_size = 1000",
             "max_payload_size = 250000000",
-            "value of `max_payload_size` is out of range (range: 100-99999999, got: 250000000)"
+            "value of `max_payload_size` is out of range (range: 100-100000000, got: 250000000)"
         );
 
         check_replace!(
             "max_players_per_address = 10",
             "max_players_per_address = 0",
-            "value of `max_players_per_address` is out of range (range: 1-999, got: 0)"
+            "value of `max_players_per_address` is out of range (range: 1-1000, got: 0)"
         );
         check_replace!(
             "max_players_per_address = 10",
-            "max_players_per_address = 1000",
-            "value of `max_players_per_address` is out of range (range: 1-999, got: 1000)"
+            "max_players_per_address = 1001",
+            "value of `max_players_per_address` is out of range (range: 1-1000, got: 1001)"
         );
 
         check_replace!(
             "max_players_per_room = 10",
             "max_players_per_room = 0",
-            "value of `max_players_per_room` is out of range (range: 1-99, got: 0)"
+            "value of `max_players_per_room` is out of range (range: 1-100, got: 0)"
         );
         check_replace!(
             "max_players_per_room = 10",
             "max_players_per_room = 150",
-            "value of `max_players_per_room` is out of range (range: 1-99, got: 150)"
+            "value of `max_players_per_room` is out of range (range: 1-100, got: 150)"
         );
 
         check_replace!(
             "max_rooms = 10",
             "max_rooms = 0",
-            "value of `max_rooms` is out of range (range: 1-399999, got: 0)"
+            "value of `max_rooms` is out of range (range: 1-400000, got: 0)"
         );
         check_replace!(
             "max_rooms = 10",
             "max_rooms = 500000",
-            "value of `max_rooms` is out of range (range: 1-399999, got: 500000)"
+            "value of `max_rooms` is out of range (range: 1-400000, got: 500000)"
         );
 
         check_replace!(
             "player_queue_capacity = 10",
             "player_queue_capacity = 0",
-            "value of `player_queue_capacity` is out of range (range: 1-9999, got: 0)"
+            "value of `player_queue_capacity` is out of range (range: 1-10000, got: 0)"
         );
         check_replace!(
             "player_queue_capacity = 10",
             "player_queue_capacity = 50000",
-            "value of `player_queue_capacity` is out of range (range: 1-9999, got: 50000)"
+            "value of `player_queue_capacity` is out of range (range: 1-10000, got: 50000)"
         );
 
         check_replace!(
             "max_message_count = 50",
             "max_message_count = 4",
-            "value of `max_message_count` is out of range (range: 5-99, got: 4)"
+            "value of `max_message_count` is out of range (range: 5-100, got: 4)"
         );
         check_replace!(
             "max_message_count = 50",
             "max_message_count = 150",
-            "value of `max_message_count` is out of range (range: 5-99, got: 150)"
+            "value of `max_message_count` is out of range (range: 5-100, got: 150)"
         );
 
         check_replace!(
             "join_room_time_limit_secs = 3",
             "join_room_time_limit_secs = 0",
-            "value of `join_room_time_limit_secs` is out of range (range: 1-59, got: 0)"
+            "value of `join_room_time_limit_secs` is out of range (range: 1-60, got: 0)"
         );
         check_replace!(
             "join_room_time_limit_secs = 3",
             "join_room_time_limit_secs = 120",
-            "value of `join_room_time_limit_secs` is out of range (range: 1-59, got: 120)"
+            "value of `join_room_time_limit_secs` is out of range (range: 1-60, got: 120)"
         );
 
         check_replace!(
             "ping_interval_secs = 5",
             "ping_interval_secs = 0",
-            "value of `ping_interval_secs` is out of range (range: 1-59, got: 0)"
+            "value of `ping_interval_secs` is out of range (range: 1-60, got: 0)"
         );
         check_replace!(
             "ping_interval_secs = 5",
             "ping_interval_secs = 90",
-            "value of `ping_interval_secs` is out of range (range: 1-59, got: 90)"
+            "value of `ping_interval_secs` is out of range (range: 1-60, got: 90)"
         );
 
         check_replace!(
             "response_time_limit_secs = 20",
             "response_time_limit_secs = 4",
-            "value of `response_time_limit_secs` is out of range (range: 5-119, got: 4)"
+            "value of `response_time_limit_secs` is out of range (range: 5-120, got: 4)"
         );
         check_replace!(
             "response_time_limit_secs = 20",
             "response_time_limit_secs = 150",
-            "value of `response_time_limit_secs` is out of range (range: 5-119, got: 150)"
+            "value of `response_time_limit_secs` is out of range (range: 5-120, got: 150)"
         );
 
         // No lower bound for 'reconnect_wait_limit_secs'.
         check_replace!(
             "reconnect_wait_limit_secs = 5",
             "reconnect_wait_limit_secs = 120",
-            "value of `reconnect_wait_limit_secs` is out of range (range: 0-59, got: 120)"
+            "value of `reconnect_wait_limit_secs` is out of range (range: 0-60, got: 120)"
         );
 
         // Certain properties cannot be greater than others.
