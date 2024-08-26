@@ -309,8 +309,27 @@ impl Room {
                     max_players_per_room = new_config.max_players_per_room;
                     info!(max_players_per_room, "room config updated");
 
-                    // TODO: If max players has been lowered, may need to kick
-                    // some players out.
+                    // If the number of players in the room is higher than the
+                    // new maximum, then we need to kick players out until the
+                    // maximum is satisfied.
+                    let num_players = player_map.len();
+                    if num_players > max_players_per_room {
+                        warn!(num_players, "too many players now, kicking excess players");
+                        let num_to_kick = num_players - max_players_per_room;
+                        let kick_iter = player_map
+                            .iter()
+                            .filter(|(&id, _)| id != HOST_ID)
+                            .take(num_to_kick);
+
+                        for (player_id, (_, notification_sender)) in kick_iter {
+                            warn!(player_id, "kicking player");
+                            let noti = RoomNotification::Error(CustomCloseCode::TooManyPlayers.into());
+                            if let Err(e) = notification_sender.send(noti) {
+                                error!(player_id, error = %e,
+                                    "failed to send close notification to player");
+                            }
+                        }
+                    }
                 }
 
                 // If we get the shutdown signal from the main thread, just let
