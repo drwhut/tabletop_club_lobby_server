@@ -64,6 +64,9 @@ pub struct RoomContext {
     pub host_stream: PlayerStream,
 
     /// A channel for the lobby to send new clients to join the room.
+    /// TODO: We can't make this a broadcast channel, since PlayerStream is not
+    /// clone-able. Would we need to use try_send in the lobby so that we don't
+    /// get a gridlock situation?
     pub new_client_receiver: mpsc::Receiver<PlayerStream>,
 
     /// A channel for the room to send control messages to the lobby.
@@ -924,5 +927,177 @@ impl fmt::Display for MessageType {
             Self::Answer => write!(f, "answer"),
             Self::Candidate => write!(f, "candidate"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use futures_util::StreamExt;
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::tungstenite::Message;
+
+    async fn server_setup(
+        port: u16,
+        room_code: RoomCode,
+        lobby_control_sender: mpsc::Sender<LobbyControl>,
+        config_receiver: watch::Receiver<VariableConfig>,
+    ) -> (JoinHandle<()>, broadcast::Sender<()>) {
+        let (ready_send, ready_receive) = oneshot::channel();
+        let (shutdown_send, mut shutdown_receive) = broadcast::channel(1);
+
+        let handle = tokio::spawn(async move {
+            let server_addr = format!("127.0.0.1:{}", port);
+            let listener = tokio::net::TcpListener::bind(server_addr)
+                .await
+                .expect("failed to create listener");
+            ready_send.send(()).expect("failed to send ready signal");
+
+            // Accept the first client as the host of the room.
+            let (conn, _) = listener.accept().await.expect("failed to accept");
+            let maybe_tls = tokio_tungstenite::MaybeTlsStream::Plain(conn);
+            let host_stream = tokio_tungstenite::accept_async(maybe_tls)
+                .await
+                .expect("failed to handshake");
+
+            let (new_client_sender, new_client_receiver) = mpsc::channel(1);
+
+            let mut room_task = Room::spawn(RoomContext {
+                room_code,
+                host_stream,
+                new_client_receiver,
+                lobby_control_sender,
+                config_receiver,
+                shutdown_signal: shutdown_receive.resubscribe(),
+            });
+
+            // Keep accepting connections and sending them to the room, until
+            // we get the shutdown signal from the test.
+            loop {
+                tokio::select! {
+                    res = listener.accept() => {
+                        let (conn, _) = res.expect("failed to accept");
+                        let maybe_tls = tokio_tungstenite::MaybeTlsStream::Plain(conn);
+                        let stream = tokio_tungstenite::accept_async(maybe_tls)
+                            .await
+                            .expect("failed to handshake");
+
+                        new_client_sender.send(stream)
+                            .await
+                            .expect("failed to send stream");
+                    }
+
+                    _ = shutdown_receive.recv() => {
+                        break;
+                    }
+                }
+            }
+
+            room_task.handle().await.expect("room task did not finish");
+        });
+
+        ready_receive.await.expect("server is not ready");
+        (handle, shutdown_send)
+    }
+
+    macro_rules! assert_msg {
+        ($s:ident, $m:expr) => {
+            let res = $s.next().await.expect("stream ended early");
+            let msg = res.expect("error receiving message from server");
+            assert_eq!(msg, Message::Text(String::from($m)));
+        };
+    }
+
+    macro_rules! assert_id {
+        ($s:ident) => {{
+            let res = $s.next().await.expect("stream ended early");
+            let msg = res.expect("error receiving message from server");
+            match msg {
+                Message::Text(mut msg) => {
+                    let mut id_str = msg.split_off(3);
+                    assert_eq!(msg, "I: ");
+
+                    let newline = id_str.split_off(id_str.len() - 1);
+                    assert_eq!(newline, "\n");
+
+                    let id = id_str.parse::<u32>().expect("id is not u32");
+                    id
+                }
+                _ => panic!("expected message type to be text"),
+            }
+        }};
+    }
+
+    macro_rules! assert_ping {
+        ($s:ident) => {
+            let res = $s.next().await.expect("stream ended early");
+            let msg = res.expect("error receiving message from server");
+            assert_eq!(msg, Message::Ping(vec!()));
+        };
+    }
+
+    // test max_players_per_room
+    // test changing max_players_per_room
+
+    // test max_message_count
+    // test changing max_message_count
+
+    // test sealing room (host and non-host)
+    // test sending messages (don't need to check validity, already done in player)
+    // test if connection is dropped (host and non-host, e.g. if client sends close code)
+    // test if close requests are received (host and non-host)
+
+    // test if shutdown signal is received
+
+    // test clients joining just as the shutdown signal is received
+    // may need to use biased! for the test?
+
+    #[tokio::test]
+    async fn test_senario() {
+        let room_code = "ABCD".try_into().unwrap();
+
+        let mut config = VariableConfig::default();
+        config.max_players_per_room = 2;
+        config.max_message_count = 5;
+
+        let (lobby_control_sender, mut lobby_control_receiver) = mpsc::channel(1);
+        let (config_sender, config_receiver) = watch::channel(config);
+
+        let (handle, shutdown_send) =
+            server_setup(12000, room_code, lobby_control_sender, config_receiver).await;
+
+        // Test that the host joins the room OK.
+        let mut host_stream = crate::client_setup!(12000);
+        assert_msg!(host_stream, "I: 1\n");
+        assert_msg!(host_stream, "J: ABCD\n");
+        assert_ping!(host_stream);
+
+        // Test that another client can join.
+        let mut client_stream = crate::client_setup!(12000);
+        let id = assert_id!(client_stream);
+        assert_msg!(client_stream, "N: 1\n");
+        assert_msg!(client_stream, "J: ABCD\n");
+        assert_ping!(client_stream);
+
+        // Test that the host is informed of the new player.
+        assert_msg!(host_stream, format!("N: {}\n", id));
+
+        // Test shutting down the room manually.
+        // TODO: Put this in another test. Want to check what happens when the
+        // host leaves in this test, as this is supposed to be a "natural"
+        // senario.
+        shutdown_send
+            .send(())
+            .expect("failed to send shutdown signal");
+
+        // Test that the room gives the correct control signals.
+        let seal_signal = lobby_control_receiver.recv().await.unwrap();
+        assert_eq!(seal_signal, LobbyControl::SealRoom(room_code));
+
+        let close_signal = lobby_control_receiver.recv().await.unwrap();
+        assert_eq!(close_signal, LobbyControl::CloseRoom(room_code));
+
+        handle.await.expect("task did not finish");
     }
 }

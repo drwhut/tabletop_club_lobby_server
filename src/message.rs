@@ -161,7 +161,7 @@ impl fmt::Display for RoomNotification {
 }
 
 /// A series of control messages that can be sent from rooms to the lobby.
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum LobbyControl {
     /// The given room is now sealed.
     ///
