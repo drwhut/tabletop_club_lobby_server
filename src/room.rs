@@ -250,6 +250,7 @@ impl Room {
                                 if request.player_id == HOST_ID {
                                     Self::on_close(
                                         RoomNotification::HostLeft,
+                                        false,
                                         context.room_code,
                                         &mut player_map,
                                         &mut player_request_receiver,
@@ -282,8 +283,12 @@ impl Room {
                             "received close request from player task");
 
                         if player_id == HOST_ID {
+                            // This will create close tasks for all players
+                            // except the host, since we need to send the given
+                            // close code to them specifically.
                             Self::on_close(
                                 RoomNotification::HostLeft,
+                                false,
                                 context.room_code,
                                 &mut player_map,
                                 &mut player_request_receiver,
@@ -291,6 +296,16 @@ impl Room {
                                 &mut close_task_tracker
                             )
                             .await;
+
+                            close_task_tracker.spawn(send_close(SendCloseContext {
+                                client_stream: player_stream,
+                                close_code,
+                                client_id: Some(ClientUniqueID::HasJoined {
+                                    room_code: context.room_code,
+                                    player_id
+                                })
+                            }));
+
                             break;
                         } else {
                             Self::on_disconnect(
@@ -460,7 +475,7 @@ impl Room {
 
         let receiver_exists = player_map.contains_key(&receiver_id);
         let valid = if let Some(sender_task) = player_map.get_mut(&sender_id) {
-            if receiver_exists {
+            if receiver_exists && (sender_id != receiver_id) {
                 // Make sure the sender isn't just spamming messages.
                 let message_count = sender_task.get_message_count(receiver_id);
                 debug!(message_count, "checking number of messages sent so far");
@@ -481,7 +496,7 @@ impl Room {
             } else {
                 error!(
                     sender_id,
-                    receiver_id, "cannot send message, receiver does not exist"
+                    receiver_id, "cannot send message, invalid destination"
                 );
                 let err = RoomNotification::Error(CustomCloseCode::InvalidDestination.into());
                 if let Err(e) = sender_task.send_notification(err) {
@@ -538,6 +553,7 @@ impl Room {
             info!("host has sealed room");
             Self::on_close(
                 RoomNotification::RoomSealed,
+                true,
                 room_code,
                 player_map,
                 request_receiver,
@@ -674,10 +690,16 @@ impl Room {
     /// This function will clear the `player_map`, so it's best to break out of
     /// the main loop after!
     ///
+    /// If the reason this is being called is because the host gave a close
+    /// request, or that the host's connection was dropped, then you should set
+    /// `send_to_host` to `false` so that this function does not try to send
+    /// a close notification to the host's task.
+    ///
     /// **NOTE:** The `notification` must cause the player task to send a close
     /// request, otherwise the function will hang!
     async fn on_close(
         notification: RoomNotification,
+        send_to_host: bool,
         room_code: RoomCode,
         player_map: &mut PlayerMap,
         request_receiver: &mut mpsc::Receiver<RoomRequest>,
@@ -693,7 +715,19 @@ impl Room {
         // await map. This way, we can keep track of which tasks have been
         // closed, and which ones are still active.
         trace!("sending close notifications");
+
         for (player_id, mut player_task) in player_map.drain() {
+            if !send_to_host && player_id == HOST_ID {
+                // If we don't want to send a notification to the host, then we
+                // are assuming that the host's task has ended some other way.
+                debug!("skipping sending close notification to host");
+                if let Err(e) = player_task.handle().await {
+                    error!(player_id, error = %e, "player task did not finish");
+                }
+
+                continue;
+            }
+
             debug!(player_id, "sending close notification to player");
             match player_task.send_notification(notification.clone()) {
                 Ok(_) => {
@@ -934,9 +968,9 @@ impl fmt::Display for MessageType {
 mod tests {
     use super::*;
 
-    use futures_util::StreamExt;
+    use futures_util::{SinkExt, StreamExt};
     use tokio::sync::oneshot;
-    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::{protocol::CloseFrame, Message};
 
     async fn server_setup(
         port: u16,
@@ -1001,6 +1035,14 @@ mod tests {
         (handle, shutdown_send)
     }
 
+    macro_rules! send_text {
+        ($s:ident, $m:expr) => {
+            $s.send(Message::Text(String::from($m)))
+                .await
+                .expect("failed to send");
+        };
+    }
+
     macro_rules! assert_msg {
         ($s:ident, $m:expr) => {
             let res = $s.next().await.expect("stream ended early");
@@ -1037,21 +1079,25 @@ mod tests {
         };
     }
 
-    // test max_players_per_room
-    // test changing max_players_per_room
+    macro_rules! assert_close {
+        ($s:ident, $c:expr) => {
+            let res = $s.next().await.expect("stream ended early");
+            let msg = res.expect("error receiving message from server");
+            match msg {
+                Message::Close(close) => {
+                    let close = close.expect("expected close code");
+                    assert_eq!(close.code, $c);
+                }
+                _ => panic!("expected message type to be close"),
+            }
+        };
+    }
 
-    // test max_message_count
-    // test changing max_message_count
-
-    // test sealing room (host and non-host)
-    // test sending messages (don't need to check validity, already done in player)
-    // test if connection is dropped (host and non-host, e.g. if client sends close code)
-    // test if close requests are received (host and non-host)
-
-    // test if shutdown signal is received
-
-    // test clients joining just as the shutdown signal is received
-    // may need to use biased! for the test?
+    macro_rules! assert_end {
+        ($s:ident) => {
+            assert!($s.next().await.is_none());
+        };
+    }
 
     #[tokio::test]
     async fn test_senario() {
@@ -1064,7 +1110,7 @@ mod tests {
         let (lobby_control_sender, mut lobby_control_receiver) = mpsc::channel(1);
         let (config_sender, config_receiver) = watch::channel(config);
 
-        let (handle, shutdown_send) =
+        let (handle, shutdown_sender) =
             server_setup(12000, room_code, lobby_control_sender, config_receiver).await;
 
         // Test that the host joins the room OK.
@@ -1083,21 +1129,480 @@ mod tests {
         // Test that the host is informed of the new player.
         assert_msg!(host_stream, format!("N: {}\n", id));
 
-        // Test shutting down the room manually.
-        // TODO: Put this in another test. Want to check what happens when the
-        // host leaves in this test, as this is supposed to be a "natural"
-        // senario.
-        shutdown_send
+        // That that another player can't join the room due to the value of
+        // `max_players_per_room`.
+        let mut denied_stream = crate::client_setup!(12000);
+        assert_close!(denied_stream, CustomCloseCode::TooManyPlayers.into());
+        assert_end!(denied_stream);
+
+        // Test that lowering the value of `max_players_per_room` will kick
+        // players in the room to fit the new value.
+        config.max_players_per_room = 1;
+        config_sender
+            .send(config)
+            .expect("failed to send new config");
+
+        // The config change will have triggered a ping, but tokio decides
+        // randomly whether the ping gets sent first, or the close.
+        let msg = client_stream
+            .next()
+            .await
+            .unwrap()
+            .expect("failed to receive message");
+
+        match msg {
+            Message::Ping(_) => {
+                assert_close!(client_stream, CustomCloseCode::TooManyPlayers.into());
+            }
+            Message::Close(maybe_close) => {
+                let close_frame = maybe_close.unwrap();
+                assert_eq!(close_frame.code, CustomCloseCode::TooManyPlayers.into());
+            }
+            _ => panic!("expected message type to be ping or close"),
+        };
+        assert_end!(client_stream);
+
+        // Test that the host is informed of the player's departure.
+        // Again, since the config was changed, we MAY get a ping before the
+        // departure message.
+        let msg = host_stream
+            .next()
+            .await
+            .unwrap()
+            .expect("failed to receive message");
+
+        let disconnect_text = format!("D: {}\n", id);
+        match msg {
+            Message::Text(text) => {
+                assert_eq!(text, disconnect_text);
+                assert_ping!(host_stream);
+            }
+            Message::Ping(_) => {
+                assert_msg!(host_stream, disconnect_text);
+            }
+            _ => panic!("expected message type to be text or ping"),
+        }
+
+        // Increase the value of `max_players_per_room`.
+        config.max_players_per_room = 3;
+        config_sender
+            .send(config)
+            .expect("failed to send new config");
+
+        // Config change should trigger a new ping.
+        assert_ping!(host_stream);
+
+        // Have two players join now instead of one, which the new config allows
+        // for.
+        let mut client_stream_1 = crate::client_setup!(12000);
+        let id_1 = assert_id!(client_stream_1);
+        assert_msg!(client_stream_1, "N: 1\n");
+        assert_msg!(client_stream_1, "J: ABCD\n");
+        assert_ping!(client_stream_1);
+
+        let id_1_msg = format!("N: {}\n", id_1);
+        assert_msg!(host_stream, id_1_msg.clone());
+
+        let mut client_stream_2 = crate::client_setup!(12000);
+        let id_2 = assert_id!(client_stream_2);
+
+        // Existing players are sent in an arbitrary order.
+        let msg = client_stream_2
+            .next()
+            .await
+            .unwrap()
+            .expect("failed to receive message");
+
+        match msg {
+            Message::Text(first) => {
+                if first == "N: 1\n" {
+                    assert_msg!(client_stream_2, id_1_msg);
+                } else if first == id_1_msg {
+                    assert_msg!(client_stream_2, "N: 1\n");
+                } else {
+                    panic!("wrong message received");
+                }
+            }
+            _ => panic!("expected message type to be text"),
+        }
+
+        assert_msg!(client_stream_2, "J: ABCD\n");
+        assert_ping!(client_stream_2);
+
+        // Test that the first two players are informed of the third's arrival.
+        let id_2_msg = format!("N: {}\n", id_2);
+        assert_msg!(host_stream, id_2_msg.clone());
+        assert_msg!(client_stream_1, id_2_msg);
+
+        // Test sending messages between players.
+        send_text!(client_stream_2, format!("O: {}\nhello!", id_1));
+        assert_msg!(client_stream_1, format!("O: {}\nhello!", id_2));
+
+        send_text!(client_stream_1, "A: 1\nhow do you do?");
+        assert_msg!(host_stream, format!("A: {}\nhow do you do?", id_1));
+
+        send_text!(host_stream, format!("C: {}\nhere you go", id_2));
+        assert_msg!(client_stream_2, "C: 1\nhere you go");
+
+        // Test sending more messages than the allowed limit to a given player.
+        for index in 0..5 {
+            send_text!(client_stream_2, format!("O: 1\n{}", index));
+            assert_msg!(host_stream, format!("O: {}\n{}", id_2, index));
+        }
+
+        send_text!(client_stream_2, "C: 1\nThis should fail!");
+        assert_close!(client_stream_2, CloseCode::Policy);
+        assert_end!(client_stream_2);
+
+        let id_2_msg = format!("D: {}\n", id_2);
+        assert_msg!(host_stream, id_2_msg.clone());
+        assert_msg!(client_stream_1, id_2_msg);
+
+        // Test changing `max_message_count`.
+        config.max_message_count = 10;
+        config_sender
+            .send(config)
+            .expect("failed to send new config");
+        assert_ping!(host_stream);
+        assert_ping!(client_stream_1);
+
+        for index in 0..9 {
+            send_text!(client_stream_1, format!("O: 1\nmessage #{}", index));
+            assert_msg!(host_stream, format!("O: {}\nmessage #{}", id_1, index));
+        }
+
+        send_text!(client_stream_1, "A: 1\nGoodbye, sweet prince.");
+        assert_close!(client_stream_1, CloseCode::Policy);
+        assert_end!(client_stream_1);
+
+        assert_msg!(host_stream, format!("D: {}\n", id_1));
+
+        let mut client_stream = crate::client_setup!(12000);
+        let id = assert_id!(client_stream);
+        assert_msg!(client_stream, "N: 1\n");
+        assert_msg!(client_stream, "J: ABCD\n");
+        assert_ping!(client_stream);
+
+        assert_msg!(host_stream, format!("N: {}\n", id));
+
+        // Test sending a message to a player that doesn't exist.
+        let dest_id = match id.checked_add(1) {
+            Some(new_id) => new_id,
+            None => 2,
+        };
+
+        send_text!(client_stream, format!("A: {}\nare you there?", dest_id));
+        assert_close!(client_stream, CustomCloseCode::InvalidDestination.into());
+        assert_end!(client_stream);
+
+        assert_msg!(host_stream, format!("D: {}\n", id));
+
+        let mut client_stream = crate::client_setup!(12000);
+        let id = assert_id!(client_stream);
+        assert_msg!(client_stream, "N: 1\n");
+        assert_msg!(client_stream, "J: ABCD\n");
+        assert_ping!(client_stream);
+
+        assert_msg!(host_stream, format!("N: {}\n", id));
+
+        // Test sending a message to self.
+        send_text!(client_stream, format!("C: {}\nHello, me!", id));
+        assert_close!(client_stream, CustomCloseCode::InvalidDestination.into());
+        assert_end!(client_stream);
+
+        assert_msg!(host_stream, format!("D: {}\n", id));
+
+        // Have two clients join to help test sealing the room.
+        let mut client_stream_1 = crate::client_setup!(12000);
+        let id_1 = assert_id!(client_stream_1);
+        assert_msg!(client_stream_1, "N: 1\n");
+        assert_msg!(client_stream_1, "J: ABCD\n");
+        assert_ping!(client_stream_1);
+
+        let id_1_msg = format!("N: {}\n", id_1);
+        assert_msg!(host_stream, id_1_msg.clone());
+
+        let mut client_stream_2 = crate::client_setup!(12000);
+        let id_2 = assert_id!(client_stream_2);
+
+        // Existing players are sent in an arbitrary order.
+        let msg = client_stream_2
+            .next()
+            .await
+            .unwrap()
+            .expect("failed to receive message");
+
+        match msg {
+            Message::Text(first) => {
+                if first == "N: 1\n" {
+                    assert_msg!(client_stream_2, id_1_msg);
+                } else if first == id_1_msg {
+                    assert_msg!(client_stream_2, "N: 1\n");
+                } else {
+                    panic!("wrong message received");
+                }
+            }
+            _ => panic!("expected message type to be text"),
+        }
+
+        assert_msg!(client_stream_2, "J: ABCD\n");
+        assert_ping!(client_stream_2);
+
+        // Test that the first two players are informed of the third's arrival.
+        let id_2_msg = format!("N: {}\n", id_2);
+        assert_msg!(host_stream, id_2_msg.clone());
+        assert_msg!(client_stream_1, id_2_msg);
+
+        // Test that a non-host player attempting to seal the room results in
+        // their connection being closed.
+        send_text!(client_stream_2, "S: \n");
+        assert_close!(client_stream_2, CustomCloseCode::OnlyHostCanSeal.into());
+        assert_end!(client_stream_2);
+
+        let id_2_msg = format!("D: {}\n", id_2);
+        assert_msg!(host_stream, id_2_msg.clone());
+        assert_msg!(client_stream_1, id_2_msg);
+
+        // Test that the host sealing the room leads to it closing.
+        send_text!(host_stream, "S: \n");
+
+        // Test that the room gives the sealed control signal, so that new
+        // clients cannot join the room.
+        let seal_signal = lobby_control_receiver.recv().await.unwrap();
+        assert_eq!(seal_signal, LobbyControl::SealRoom(room_code));
+
+        // Test that the correct close code is given to the clients.
+        assert_close!(host_stream, CustomCloseCode::RoomSealed.into());
+        assert_end!(host_stream);
+        assert_close!(client_stream_1, CustomCloseCode::RoomSealed.into());
+        assert_end!(client_stream_1);
+
+        // Test that the room fully closes by giving the closed control signal.
+        let close_signal = lobby_control_receiver.recv().await.unwrap();
+        assert_eq!(close_signal, LobbyControl::CloseRoom(room_code));
+
+        // Send shutdown signal so the test server closes gracefully.
+        shutdown_sender
+            .send(())
+            .expect("failed to send shutdown signal");
+        handle.await.expect("task did not finish");
+    }
+
+    #[tokio::test]
+    async fn test_shutdown() {
+        let room_code = "SHUT".try_into().unwrap();
+
+        let (lobby_control_sender, mut lobby_control_receiver) = mpsc::channel(1);
+        let (_config_sender, config_receiver) = watch::channel(VariableConfig::default());
+
+        let (handle, shutdown_sender) =
+            server_setup(12001, room_code, lobby_control_sender, config_receiver).await;
+
+        // Test that the host joins the room OK.
+        let mut host_stream = crate::client_setup!(12001);
+        assert_msg!(host_stream, "I: 1\n");
+        assert_msg!(host_stream, "J: SHUT\n");
+        assert_ping!(host_stream);
+
+        // Send the shutdown signal.
+        shutdown_sender
             .send(())
             .expect("failed to send shutdown signal");
 
-        // Test that the room gives the correct control signals.
+        // The host's connection should just be dropped.
+        host_stream
+            .next()
+            .await
+            .unwrap()
+            .expect_err("expected connection drop");
+
+        // Check that the room still sends the lobby control signals (although
+        // in reality, the lobby won't actually use them in this senario).
         let seal_signal = lobby_control_receiver.recv().await.unwrap();
         assert_eq!(seal_signal, LobbyControl::SealRoom(room_code));
 
         let close_signal = lobby_control_receiver.recv().await.unwrap();
         assert_eq!(close_signal, LobbyControl::CloseRoom(room_code));
 
+        handle.await.expect("task did not finish");
+    }
+
+    #[tokio::test]
+    async fn test_host_error() {
+        let room_code = "HOST".try_into().unwrap();
+
+        let (lobby_control_sender, mut lobby_control_receiver) = mpsc::channel(1);
+        let (_config_sender, config_receiver) = watch::channel(VariableConfig::default());
+
+        let (handle, shutdown_sender) =
+            server_setup(12002, room_code, lobby_control_sender, config_receiver).await;
+
+        // Test that the host joins the room OK.
+        let mut host_stream = crate::client_setup!(12002);
+        assert_msg!(host_stream, "I: 1\n");
+        assert_msg!(host_stream, "J: HOST\n");
+        assert_ping!(host_stream);
+
+        // Test that another client can join.
+        let mut client_stream = crate::client_setup!(12002);
+        let id = assert_id!(client_stream);
+        assert_msg!(client_stream, "N: 1\n");
+        assert_msg!(client_stream, "J: HOST\n");
+        assert_ping!(client_stream);
+
+        // Test that the host is informed of the new player.
+        assert_msg!(host_stream, format!("N: {}\n", id));
+
+        // Test that, if the host does something that causes the room to send
+        // them a close code, that the room is closed.
+        send_text!(host_stream, "O: 1\nIt's a me, Mario!");
+
+        // Test that the room gives the sealed control signal, so that new
+        // clients cannot join the room.
+        let seal_signal = lobby_control_receiver.recv().await.unwrap();
+        assert_eq!(seal_signal, LobbyControl::SealRoom(room_code));
+
+        // Test that the correct close code is given to the clients.
+        assert_close!(host_stream, CustomCloseCode::InvalidDestination.into());
+        assert_end!(host_stream);
+        assert_close!(client_stream, CustomCloseCode::HostDisconnected.into());
+        assert_end!(client_stream);
+
+        // Test that the room fully closes by giving the closed control signal.
+        let close_signal = lobby_control_receiver.recv().await.unwrap();
+        assert_eq!(close_signal, LobbyControl::CloseRoom(room_code));
+
+        // Send shutdown signal so the test server closes gracefully.
+        shutdown_sender
+            .send(())
+            .expect("failed to send shutdown signal");
+        handle.await.expect("task did not finish");
+    }
+
+    #[tokio::test]
+    async fn test_client_close() {
+        let room_code = "CLOS".try_into().unwrap();
+
+        let (lobby_control_sender, mut lobby_control_receiver) = mpsc::channel(1);
+        let (_config_sender, config_receiver) = watch::channel(VariableConfig::default());
+
+        let (handle, shutdown_sender) =
+            server_setup(12003, room_code, lobby_control_sender, config_receiver).await;
+
+        // Test that the host joins the room OK.
+        let mut host_stream = crate::client_setup!(12003);
+        assert_msg!(host_stream, "I: 1\n");
+        assert_msg!(host_stream, "J: CLOS\n");
+        assert_ping!(host_stream);
+
+        // Test that another client can join.
+        let mut client_stream = crate::client_setup!(12003);
+        let id = assert_id!(client_stream);
+        assert_msg!(client_stream, "N: 1\n");
+        assert_msg!(client_stream, "J: CLOS\n");
+        assert_ping!(client_stream);
+
+        // Test that the host is informed of the new player.
+        assert_msg!(host_stream, format!("N: {}\n", id));
+
+        // Test that if the joined client sends a close code, that the host is
+        // informed of their departure.
+        client_stream
+            .close(Some(CloseFrame {
+                code: CloseCode::Normal,
+                reason: "".into(),
+            }))
+            .await
+            .expect("failed to send close");
+
+        assert_msg!(host_stream, format!("D: {}\n", id));
+
+        // Have another client join for the next part of the test.
+        let mut client_stream = crate::client_setup!(12003);
+        let id = assert_id!(client_stream);
+        assert_msg!(client_stream, "N: 1\n");
+        assert_msg!(client_stream, "J: CLOS\n");
+        assert_ping!(client_stream);
+
+        // Test that the host is informed of the new player.
+        assert_msg!(host_stream, format!("N: {}\n", id));
+
+        // Test that the host sending a close code closes the room.
+        host_stream
+            .close(Some(CloseFrame {
+                code: CloseCode::Normal,
+                reason: "".into(),
+            }))
+            .await
+            .expect("failed to send close");
+
+        // Test that the room gives the sealed control signal, so that new
+        // clients cannot join the room.
+        let seal_signal = lobby_control_receiver.recv().await.unwrap();
+        assert_eq!(seal_signal, LobbyControl::SealRoom(room_code));
+
+        // Test that the correct close code is given to the joined client.
+        assert_close!(client_stream, CustomCloseCode::HostDisconnected.into());
+        assert_end!(client_stream);
+
+        // Test that the room fully closes by giving the closed control signal.
+        let close_signal = lobby_control_receiver.recv().await.unwrap();
+        assert_eq!(close_signal, LobbyControl::CloseRoom(room_code));
+
+        // Send shutdown signal so the test server closes gracefully.
+        shutdown_sender
+            .send(())
+            .expect("failed to send shutdown signal");
+        handle.await.expect("task did not finish");
+    }
+
+    #[tokio::test]
+    async fn test_client_drop() {
+        let room_code = "CLOS".try_into().unwrap();
+
+        let (lobby_control_sender, mut lobby_control_receiver) = mpsc::channel(1);
+        let (_config_sender, config_receiver) = watch::channel(VariableConfig::default());
+
+        let (handle, shutdown_sender) =
+            server_setup(12004, room_code, lobby_control_sender, config_receiver).await;
+
+        {
+            // Test that the host joins the room OK.
+            let mut host_stream = crate::client_setup!(12004);
+            assert_msg!(host_stream, "I: 1\n");
+            assert_msg!(host_stream, "J: CLOS\n");
+            assert_ping!(host_stream);
+
+            let id = {
+                // Test that another client can join.
+                let mut client_stream = crate::client_setup!(12004);
+                let id = assert_id!(client_stream);
+                assert_msg!(client_stream, "N: 1\n");
+                assert_msg!(client_stream, "J: CLOS\n");
+                assert_ping!(client_stream);
+
+                // Test that the host is informed of the new player.
+                assert_msg!(host_stream, format!("N: {}\n", id));
+                id
+            };
+
+            // Test that if the joined client's connection is suddenly dropped,
+            // that the host is informed of their departure.
+            assert_msg!(host_stream, format!("D: {}\n", id));
+        }
+
+        // Test that if the host's connection is suddenly dropped, that the room
+        // is closed, and that the correct lobby control signals are sent.
+        let seal_signal = lobby_control_receiver.recv().await.unwrap();
+        assert_eq!(seal_signal, LobbyControl::SealRoom(room_code));
+
+        let close_signal = lobby_control_receiver.recv().await.unwrap();
+        assert_eq!(close_signal, LobbyControl::CloseRoom(room_code));
+
+        // Send shutdown signal so the test server closes gracefully.
+        shutdown_sender
+            .send(())
+            .expect("failed to send shutdown signal");
         handle.await.expect("task did not finish");
     }
 }
