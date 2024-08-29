@@ -69,7 +69,6 @@ pub enum ClientUniqueID {
 impl fmt::Display for ClientUniqueID {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // TODO: See how this format looks in the logs.
             Self::IsJoining(handle_id) => write!(f, "handle_id={}", handle_id),
             Self::HasJoined {
                 room_code,
@@ -157,7 +156,6 @@ pub async fn send_close(mut context: SendCloseContext) {
 /// Keep reading messages from the given client until one is a close frame,
 /// or until the stream is closed. Returns the close code given, or an error
 /// if the message is invalid, or the stream ended unexpectedly.
-/// TODO: Check if this function still counts under the player_close trace?
 async fn read_until_close_frame(stream: &mut PlayerStream) -> Result<CloseCode, ()> {
     loop {
         match stream.next().await {

@@ -64,9 +64,6 @@ pub struct RoomContext {
     pub host_stream: PlayerStream,
 
     /// A channel for the lobby to send new clients to join the room.
-    /// TODO: We can't make this a broadcast channel, since PlayerStream is not
-    /// clone-able. Would we need to use try_send in the lobby so that we don't
-    /// get a gridlock situation?
     pub new_client_receiver: mpsc::Receiver<PlayerStream>,
 
     /// A channel for the room to send control messages to the lobby.
@@ -90,6 +87,7 @@ pub struct RoomContext {
 /// given by the lobby. All clients that were already in the room are notified
 /// of the new player and their [`PlayerID`], which they can use to send WebRTC
 /// messages to that player if they wish.
+#[derive(Debug)]
 pub struct Room {
     handle: JoinHandle<()>,
 }
@@ -460,9 +458,6 @@ impl Room {
     /// in the form of a [`RoomNotification`].
     ///
     /// If the recipient does not exist, then the sender's connection is closed.
-    ///
-    /// TODO: Set a limit on the number of messages that can be sent from one
-    /// player to each other player.
     async fn try_send_message(
         sender_id: PlayerID,
         receiver_id: PlayerID,
@@ -868,7 +863,10 @@ impl Room {
 
     /// Generate a random [`PlayerID`] for a non-host player.
     fn random_player_id() -> PlayerID {
-        fastrand::u32(2..)
+        // Since the host will always be given the ID 1, all players that join
+        // need to have an ID greather than 1. Godot also requires that peer IDs
+        // be no bigger than the largest *signed* 32-bit integer.
+        fastrand::u32(2..0x7FFFFFFF)
     }
 }
 

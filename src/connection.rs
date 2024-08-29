@@ -51,8 +51,8 @@ pub struct ConnectionContext {
     /// The maximum size of incoming message payloads, in bytes.
     pub max_payload_size: usize,
 
-    /// Send established connections and their remote addresses to the lobby.
-    pub send_to_lobby: mpsc::Sender<(PlayerStream, SocketAddr)>,
+    /// Send established connections to the lobby.
+    pub send_to_lobby: mpsc::Sender<PlayerStream>,
 
     /// The shutdown signal receiver from the main thread.
     pub shutdown_signal: broadcast::Receiver<()>,
@@ -150,11 +150,8 @@ pub async fn accept_connection(mut context: ConnectionContext) {
         if let Some(ws_stream) = maybe_ws_stream {
             info!("connection established");
 
-            // Send the stream and its remote address to the lobby.
-            let res = context
-                .send_to_lobby
-                .send((ws_stream, context.remote_addr))
-                .await;
+            // Send the stream to the lobby.
+            let res = context.send_to_lobby.send(ws_stream).await;
             if let Err(e) = res {
                 error!(error = %e, "lobby receiver dropped, is the server shutting down?");
             }
@@ -265,11 +262,10 @@ mod tests {
 
             // When the stream is accepted, it should be sent to the lobby along
             // with the client's address.
-            let (mut srv_stream, our_addr) = lobby_receive
+            let mut srv_stream = lobby_receive
                 .recv()
                 .await
                 .expect("did not receive accepted stream");
-            assert_eq!(our_addr.ip().to_string(), "127.0.0.1");
 
             // Send a message within the payload limit.
             let message_ok = "A".repeat(test.max_payload_size);
