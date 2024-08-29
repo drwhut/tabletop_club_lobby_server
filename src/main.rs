@@ -124,7 +124,7 @@ async fn main() -> Result<(), std::io::Error> {
             }
         }
     } else {
-        warn!("tls disabled, only modified clients can connect");
+        warn!("tls disabled, clients can only connect via reverse proxy");
         None
     };
 

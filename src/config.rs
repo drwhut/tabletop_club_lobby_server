@@ -53,7 +53,6 @@ pub struct VariableConfig {
     pub max_message_size: usize,
     pub max_payload_size: usize,
 
-    pub max_players_per_address: usize,
     pub max_players_per_room: usize,
     pub max_rooms: usize,
     pub player_queue_capacity: usize,
@@ -63,7 +62,6 @@ pub struct VariableConfig {
     pub join_room_time_limit_secs: u64,
     pub ping_interval_secs: u64,
     pub response_time_limit_secs: u64,
-    pub reconnect_wait_limit_secs: u64,
 }
 
 impl Default for VariableConfig {
@@ -73,7 +71,6 @@ impl Default for VariableConfig {
             max_message_size: 10100,
             max_payload_size: 10000,
 
-            max_players_per_address: 5,
             max_players_per_room: 10,
             max_rooms: 100,
             player_queue_capacity: 100,
@@ -83,7 +80,6 @@ impl Default for VariableConfig {
             join_room_time_limit_secs: 5,
             ping_interval_secs: 10,
             response_time_limit_secs: 30,
-            reconnect_wait_limit_secs: 5,
         }
     }
 }
@@ -165,13 +161,6 @@ impl VariableConfig {
 
         Self::set_key_prefix(
             &mut document,
-            "max_players_per_address",
-            "
-# The maximum number of clients allowed per remote address.\n",
-        );
-
-        Self::set_key_prefix(
-            &mut document,
             "max_players_per_room",
             "
 # The maximum number of players allowed in each room.\n",
@@ -226,14 +215,6 @@ impl VariableConfig {
 # enough time to send pong packets.\n",
         );
 
-        Self::set_key_prefix(
-            &mut document,
-            "reconnect_wait_limit_secs",
-            "
-# How long players need to wait after their previous connection before being
-# able to connect again, in seconds.\n",
-        );
-
         fs::write(path, document.to_string().as_bytes()).await
     }
 
@@ -241,7 +222,6 @@ impl VariableConfig {
     pub fn validate(&self) -> Result<(), VariableConfigError> {
         check_range!(self, max_message_size, 100..=100_000_000); // 100MB.
         check_range!(self, max_payload_size, 100..=100_000_000);
-        check_range!(self, max_players_per_address, 1..=1000);
         check_range!(self, max_players_per_room, 1..=100);
         check_range!(self, max_rooms, 1..=400_000);
         check_range!(self, player_queue_capacity, 1..=10_000);
@@ -249,7 +229,6 @@ impl VariableConfig {
         check_range!(self, join_room_time_limit_secs, 1..=60);
         check_range!(self, ping_interval_secs, 1..=60);
         check_range!(self, response_time_limit_secs, 5..=120);
-        check_range!(self, reconnect_wait_limit_secs, 0..=60);
 
         check_lt!(self, max_payload_size, max_message_size);
         check_lt!(self, join_room_time_limit_secs, ping_interval_secs);
@@ -383,7 +362,7 @@ mod tests {
     #[tokio::test]
     async fn read_and_write() -> Result<(), std::io::Error> {
         let mut config = VariableConfig::default();
-        config.max_players_per_address = 15;
+        config.max_players_per_room = 15;
         config.max_rooms = 250;
         config.player_queue_capacity = 10;
         config.ping_interval_secs = 6;
@@ -415,15 +394,13 @@ mod tests {
     const VALID_CONTENTS: &str = "
 max_message_size = 1100
 max_payload_size = 1000
-max_players_per_address = 10
 max_players_per_room = 10
 max_rooms = 10
 player_queue_capacity = 10
 max_message_count = 50
 join_room_time_limit_secs = 3
 ping_interval_secs = 5
-response_time_limit_secs = 20
-reconnect_wait_limit_secs = 5";
+response_time_limit_secs = 20";
 
     #[tokio::test]
     async fn read_err() -> Result<(), std::io::Error> {
@@ -449,11 +426,11 @@ reconnect_wait_limit_secs = 5";
 
         // Value with wrong type.
         check_replace!("player_queue_capacity = 10", "player_queue_capacity = \"10\"",
-                "TOML parse error at line 7, column 25\n  |\n7 | player_queue_capacity = \"10\"\n  |                         ^^^^\ninvalid type: string \"10\", expected usize\n");
+                "TOML parse error at line 6, column 25\n  |\n6 | player_queue_capacity = \"10\"\n  |                         ^^^^\ninvalid type: string \"10\", expected usize\n");
 
         // Negative value.
         check_replace!("max_players_per_room = 10", "max_players_per_room = -1",
-                "TOML parse error at line 5, column 24\n  |\n5 | max_players_per_room = -1\n  |                        ^^\ninvalid value: integer `-1`, expected usize\n");
+                "TOML parse error at line 4, column 24\n  |\n4 | max_players_per_room = -1\n  |                        ^^\ninvalid value: integer `-1`, expected usize\n");
 
         // Out of range values.
         check_replace!(
@@ -476,17 +453,6 @@ reconnect_wait_limit_secs = 5";
             "max_payload_size = 1000",
             "max_payload_size = 250000000",
             "value of `max_payload_size` is out of range (range: 100-100000000, got: 250000000)"
-        );
-
-        check_replace!(
-            "max_players_per_address = 10",
-            "max_players_per_address = 0",
-            "value of `max_players_per_address` is out of range (range: 1-1000, got: 0)"
-        );
-        check_replace!(
-            "max_players_per_address = 10",
-            "max_players_per_address = 1001",
-            "value of `max_players_per_address` is out of range (range: 1-1000, got: 1001)"
         );
 
         check_replace!(
@@ -566,13 +532,6 @@ reconnect_wait_limit_secs = 5";
             "value of `response_time_limit_secs` is out of range (range: 5-120, got: 150)"
         );
 
-        // No lower bound for 'reconnect_wait_limit_secs'.
-        check_replace!(
-            "reconnect_wait_limit_secs = 5",
-            "reconnect_wait_limit_secs = 120",
-            "value of `reconnect_wait_limit_secs` is out of range (range: 0-60, got: 120)"
-        );
-
         // Certain properties cannot be greater than others.
         check_replace!("max_message_size = 1100", "max_message_size = 900",
                 "value of `max_payload_size` (1000) is more than or equal to the value of `max_message_size` (900)");
@@ -648,7 +607,6 @@ reconnect_wait_limit_secs = 5";
         let test_config = VariableConfig {
             max_message_size: 600,
             max_payload_size: 500,
-            max_players_per_address: 1,
             max_players_per_room: 5,
             max_rooms: 10,
             player_queue_capacity: 5,
@@ -656,7 +614,6 @@ reconnect_wait_limit_secs = 5";
             join_room_time_limit_secs: 5,
             ping_interval_secs: 10,
             response_time_limit_secs: 20,
-            reconnect_wait_limit_secs: 5,
         };
         assert!(test_config.validate().is_ok());
 
@@ -691,7 +648,6 @@ reconnect_wait_limit_secs = 5";
         let test_config = VariableConfig {
             max_message_size: 200,
             max_payload_size: 100,
-            max_players_per_address: 100,
             max_players_per_room: 50,
             max_rooms: 100,
             player_queue_capacity: 500,
@@ -699,7 +655,6 @@ reconnect_wait_limit_secs = 5";
             join_room_time_limit_secs: 30,
             ping_interval_secs: 40,
             response_time_limit_secs: 60,
-            reconnect_wait_limit_secs: 10,
         };
         assert!(test_config.validate().is_ok());
 
@@ -723,7 +678,6 @@ reconnect_wait_limit_secs = 5";
         let test_config = VariableConfig {
             max_message_size: 3000,
             max_payload_size: 2500,
-            max_players_per_address: 20,
             max_players_per_room: 10,
             max_rooms: 1000,
             player_queue_capacity: 100,
@@ -731,7 +685,6 @@ reconnect_wait_limit_secs = 5";
             join_room_time_limit_secs: 10,
             ping_interval_secs: 15,
             response_time_limit_secs: 20,
-            reconnect_wait_limit_secs: 5,
         };
         assert!(test_config.validate().is_ok());
 

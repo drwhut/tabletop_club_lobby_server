@@ -86,9 +86,15 @@ pub enum CustomCloseCode {
     InvalidMode,
 
     /// Too many connections from the same IP address.
+    ///
+    /// **NOTE:** This code is redundant, as connection limiting should ideally
+    /// be implemented via a reverse proxy.
     TooManyConnections,
 
     /// Established another connection too quickly after the last one.
+    ///
+    /// **NOTE:** This code is redundant, as rate limiting should ideally be
+    /// implemented via a reverse proxy.
     ReconnectTooQuickly,
 
     /// The queue of players trying to create or join rooms is at capacity.

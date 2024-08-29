@@ -80,13 +80,14 @@ pub async fn lobby_task(mut context: LobbyContext) {
     // Read the server configuration as it currently stands - it may be updated
     // later.
     let starting_config = *context.config_receiver.borrow_and_update();
-    let mut max_players_per_address = starting_config.max_players_per_address;
+    //let mut max_players_per_address = starting_config.max_players_per_address;
     let mut player_queue_capacity = starting_config.player_queue_capacity;
     let join_room_time_limit_secs = starting_config.join_room_time_limit_secs;
 
     debug!(
-        max_players_per_address,
-        player_queue_capacity, join_room_time_limit_secs, "read config"
+        //max_players_per_address,
+        player_queue_capacity,
+        join_room_time_limit_secs, "read config"
     );
 
     // Create dedicated [`Duration`] structures for time limits.
@@ -114,10 +115,12 @@ pub async fn lobby_task(mut context: LobbyContext) {
                     let addr_conn_count = handle_list.len();
                     debug!(n = addr_conn_count, "checking existing connections from this address");
 
+                    /*
                     if addr_conn_count >= max_players_per_address {
                         error!("too many connections from this address");
                         maybe_close_code = Some(CustomCloseCode::TooManyConnections.into());
                     }
+                    */
 
                     // Check that the join queue isn't full.
                     let player_queue_len = join_queue.len();
@@ -217,11 +220,11 @@ pub async fn lobby_task(mut context: LobbyContext) {
             Ok(()) = context.config_receiver.changed() => {
                 let new_config = context.config_receiver.borrow_and_update();
 
-                max_players_per_address = new_config.max_players_per_address;
+                //max_players_per_address = new_config.max_players_per_address;
                 player_queue_capacity = new_config.player_queue_capacity;
                 let join_room_time_limit_secs = new_config.join_room_time_limit_secs;
                 info!(
-                    max_players_per_address,
+                    //max_players_per_address,
                     player_queue_capacity,
                     join_room_time_limit_secs, "lobby config updated"
                 );
