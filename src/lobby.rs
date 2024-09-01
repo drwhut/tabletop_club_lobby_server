@@ -162,8 +162,7 @@ pub async fn lobby_task(mut context: LobbyContext) {
                 } else {
                     // All senders have been dropped - we will never get
                     // another incoming client.
-                    error!("all connection senders have been dropped");
-                    break;
+                    panic!("all connection senders have been dropped");
                 }
             },
 
@@ -302,8 +301,7 @@ pub async fn lobby_task(mut context: LobbyContext) {
                 } else {
                     // All senders have been dropped - we will never get another
                     // request again.
-                    error!("all request senders have been dropped");
-                    break;
+                    panic!("all request senders have been dropped");
                 }
             },
 
@@ -348,8 +346,7 @@ pub async fn lobby_task(mut context: LobbyContext) {
                 } else {
                     // All senders have been dropped - we will never get another
                     // control signal again.
-                    error!("all control signal senders have been dropped");
-                    break;
+                    panic!("all control signal senders have been dropped");
                 }
             },
 

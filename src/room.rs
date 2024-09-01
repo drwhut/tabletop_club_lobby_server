@@ -185,8 +185,7 @@ impl Room {
                     },
                     None => {
                         // If we get here, this means the lobby is gone.
-                        error!("new client sender dropped");
-                        break;
+                        panic!("new client sender dropped");
                     }
                 },
 
@@ -270,8 +269,7 @@ impl Room {
                     },
                     None => {
                         // Something's gone very wrong if we get here.
-                        error!("all player request senders dropped");
-                        break;
+                        panic!("all player request senders dropped");
                     }
                 },
 
@@ -320,8 +318,7 @@ impl Room {
                     },
                     None => {
                         // Something's gone very wrong if we get here.
-                        error!("all close request senders dropped");
-                        break;
+                        panic!("all close request senders dropped");
                     }
                 },
 
