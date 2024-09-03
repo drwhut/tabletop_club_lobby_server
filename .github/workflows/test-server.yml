@@ -1,0 +1,14 @@
+name: Test Server
+on: [ push, pull_request ]
+jobs:
+  build-and-test:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Check Formatting
+        run: cargo fmt --check --verbose
+      - name: Check Compile Errors
+        run: cargo check --all-targets --verbose
+      - name: Run Tests
+        run: cargo test --all-targets --verbose
