@@ -220,7 +220,7 @@ mod tests {
 
         let maybe_tls = if is_encrypted {
             // Add the test certificate as trusted.
-            let cert_bytes = tokio::fs::read("tests/certificate.pem")
+            let cert_bytes = tokio::fs::read("tests/certificate.crt")
                 .await
                 .expect("failed to read test certificate");
             let cert = tokio_native_tls::native_tls::Certificate::from_pem(&cert_bytes)
@@ -309,7 +309,7 @@ mod tests {
 
     #[tokio::test]
     async fn accept_tls() {
-        let cert_bytes = tokio::fs::read("tests/certificate.pem")
+        let cert_bytes = tokio::fs::read("tests/certificate.crt")
             .await
             .expect("failed to read test certificate");
         let key_bytes = tokio::fs::read("tests/private.pem")
