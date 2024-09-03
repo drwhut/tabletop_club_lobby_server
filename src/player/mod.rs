@@ -130,6 +130,12 @@ pub async fn send_close(mut context: SendCloseContext) {
                     Ok(close_code_received) => {
                         if close_code_received == context.close_code {
                             trace!("received echo was the expected value");
+                        } else if close_code_received == CloseCode::Normal
+                            && context.close_code == CustomCloseCode::RoomSealed.into()
+                        {
+                            // This is OK, since hosts may immediately close the
+                            // connection normally after sealing the room.
+                            trace!("received normal close code after room sealed");
                         } else {
                             warn!(
                                 expected = %context.close_code,
