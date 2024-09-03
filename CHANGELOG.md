@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2024-09-03
+
 ### Added
 
-- Released the first version of the Tabletop Club Lobby Server! \o/
+- Released the first version of the new Tabletop Club Lobby Server! \o/
+
+[unreleased]: https://github.com/drwhut/tabletop_club_lobby_server/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/drwhut/tabletop_club_lobby_server/releases/tag/v0.1.0
