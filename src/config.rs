@@ -62,6 +62,7 @@ pub struct VariableConfig {
     pub join_room_time_limit_secs: u64,
     pub ping_interval_secs: u64,
     pub response_time_limit_secs: u64,
+    pub room_time_limit_mins: u64,
 }
 
 impl Default for VariableConfig {
@@ -80,6 +81,7 @@ impl Default for VariableConfig {
             join_room_time_limit_secs: 5,
             ping_interval_secs: 10,
             response_time_limit_secs: 30,
+            room_time_limit_mins: 720,
         }
     }
 }
@@ -215,6 +217,13 @@ impl VariableConfig {
 # enough time to send pong packets.\n",
         );
 
+        Self::set_key_prefix(
+            &mut document,
+            "room_time_limit_mins",
+            "
+# How long a room is allowed to be open for, in minutes.\n",
+        );
+
         fs::write(path, document.to_string().as_bytes()).await
     }
 
@@ -229,6 +238,7 @@ impl VariableConfig {
         check_range!(self, join_room_time_limit_secs, 1..=60);
         check_range!(self, ping_interval_secs, 1..=60);
         check_range!(self, response_time_limit_secs, 5..=120);
+        check_range!(self, room_time_limit_mins, 1..=1440);
 
         check_lt!(self, max_payload_size, max_message_size);
         check_lt!(self, join_room_time_limit_secs, ping_interval_secs);
@@ -400,7 +410,8 @@ player_queue_capacity = 10
 max_message_count = 50
 join_room_time_limit_secs = 3
 ping_interval_secs = 5
-response_time_limit_secs = 20";
+response_time_limit_secs = 20
+room_time_limit_mins = 30";
 
     #[tokio::test]
     async fn read_err() -> Result<(), std::io::Error> {
@@ -532,6 +543,17 @@ response_time_limit_secs = 20";
             "value of `response_time_limit_secs` is out of range (range: 5-120, got: 150)"
         );
 
+        check_replace!(
+            "room_time_limit_mins = 30",
+            "room_time_limit_mins = 0",
+            "value of `room_time_limit_mins` is out of range (range: 1-1440, got: 0)"
+        );
+        check_replace!(
+            "room_time_limit_mins = 30",
+            "room_time_limit_mins = 2000",
+            "value of `room_time_limit_mins` is out of range (range: 1-1440, got: 2000)"
+        );
+
         // Certain properties cannot be greater than others.
         check_replace!("max_message_size = 1100", "max_message_size = 900",
                 "value of `max_payload_size` (1000) is more than or equal to the value of `max_message_size` (900)");
@@ -614,6 +636,7 @@ response_time_limit_secs = 20";
             join_room_time_limit_secs: 5,
             ping_interval_secs: 10,
             response_time_limit_secs: 20,
+            room_time_limit_mins: 60,
         };
         assert!(test_config.validate().is_ok());
 
@@ -655,6 +678,7 @@ response_time_limit_secs = 20";
             join_room_time_limit_secs: 30,
             ping_interval_secs: 40,
             response_time_limit_secs: 60,
+            room_time_limit_mins: 120,
         };
         assert!(test_config.validate().is_ok());
 
@@ -685,6 +709,7 @@ response_time_limit_secs = 20";
             join_room_time_limit_secs: 10,
             ping_interval_secs: 15,
             response_time_limit_secs: 20,
+            room_time_limit_mins: 1000,
         };
         assert!(test_config.validate().is_ok());
 

@@ -36,6 +36,7 @@ use tokio::sync::broadcast::error::SendError;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio::time::{interval, Duration, Instant};
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
@@ -119,7 +120,25 @@ impl Room {
         let starting_config = *context.config_receiver.borrow_and_update();
         let mut max_players_per_room = starting_config.max_players_per_room;
         let mut max_message_count = starting_config.max_message_count;
-        debug!(max_players_per_room, max_message_count, "read config");
+        let room_time_limit_mins = starting_config.room_time_limit_mins;
+        debug!(
+            max_players_per_room,
+            max_message_count, room_time_limit_mins, "read config"
+        );
+
+        // Create an interval that ticks when the time limit has been reached
+        // for the room. This prevents users from creating rooms and then
+        // leaving them idle forever.
+        let room_time_limit = Duration::from_secs(60 * room_time_limit_mins);
+        let mut time_limit_interval = interval(room_time_limit);
+
+        // The interval will tick once immediately, so wait for it so that the
+        // room doesn't close straight away.
+        time_limit_interval.tick().await;
+
+        // Keep track of when the room was created, so that in the event the
+        // time limit changes, we can calculate how much time is remaining after.
+        let room_created_time = Instant::now();
 
         // Create channels for players to send us requests and closes.
         let (player_request_sender, mut player_request_receiver) =
@@ -326,7 +345,40 @@ impl Room {
                     let new_config = *context.config_receiver.borrow_and_update();
                     max_players_per_room = new_config.max_players_per_room;
                     max_message_count = new_config.max_message_count;
-                    info!(max_players_per_room, max_message_count, "room config updated");
+                    let room_time_limit_mins = new_config.room_time_limit_mins;
+                    info!(max_players_per_room, max_message_count,
+                        room_time_limit_mins, "room config updated");
+
+                    // Check to see if the room has gone over the new time limit.
+                    let time_elapsed = Instant::now() - room_created_time;
+                    let time_remaining = Duration::from_secs(60 * room_time_limit_mins)
+                        .saturating_sub(time_elapsed);
+
+                    let time_elapsed_secs = time_elapsed.as_secs();
+                    let time_remaining_secs = time_remaining.as_secs();
+                    debug!(time_elapsed_secs, time_remaining_secs);
+
+                    if time_remaining.is_zero() {
+                        warn!(time_elapsed_secs,
+                            "room open longer than new time limit, closing");
+                        Self::on_close(
+                            RoomNotification::Error(CloseCode::Policy),
+                            true,
+                            context.room_code,
+                            &mut player_map,
+                            &mut player_request_receiver,
+                            &mut player_close_receiver,
+                            &mut close_task_tracker,
+                        )
+                        .await;
+                        break;
+                    } else {
+                        // Create a new interval with the remaining time, and
+                        // wait for the first tick so the room doesn't close
+                        // straight away.
+                        time_limit_interval = interval(time_remaining);
+                        time_limit_interval.tick().await;
+                    }
 
                     // If the number of players in the room is higher than the
                     // new maximum, then we need to kick players out until the
@@ -349,6 +401,21 @@ impl Room {
                             }
                         }
                     }
+                }
+
+                _ = time_limit_interval.tick() => {
+                    warn!("time limit reached, closing");
+                    Self::on_close(
+                        RoomNotification::Error(CloseCode::Policy),
+                        true,
+                        context.room_code,
+                        &mut player_map,
+                        &mut player_request_receiver,
+                        &mut player_close_receiver,
+                        &mut close_task_tracker,
+                    )
+                    .await;
+                    break;
                 }
 
                 // If we get the shutdown signal from the main thread, just let
@@ -965,6 +1032,7 @@ mod tests {
 
     use futures_util::{SinkExt, StreamExt};
     use tokio::sync::oneshot;
+    use tokio::time::advance;
     use tokio_tungstenite::tungstenite::{protocol::CloseFrame, Message};
 
     async fn server_setup(
@@ -1591,6 +1659,122 @@ mod tests {
         let seal_signal = lobby_control_receiver.recv().await.unwrap();
         assert_eq!(seal_signal, LobbyControl::SealRoom(room_code));
 
+        let close_signal = lobby_control_receiver.recv().await.unwrap();
+        assert_eq!(close_signal, LobbyControl::CloseRoom(room_code));
+
+        // Send shutdown signal so the test server closes gracefully.
+        shutdown_sender
+            .send(())
+            .expect("failed to send shutdown signal");
+        handle.await.expect("task did not finish");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_time_limit() {
+        let room_code = "TIME".try_into().unwrap();
+        let mut config = VariableConfig::default();
+        config.ping_interval_secs = 9;
+        config.room_time_limit_mins = 2;
+
+        let (lobby_control_sender, mut lobby_control_receiver) = mpsc::channel(1);
+        let (_config_sender, config_receiver) = watch::channel(config);
+
+        let (handle, shutdown_sender) =
+            server_setup(12005, room_code, lobby_control_sender, config_receiver).await;
+
+        // Test that the host joins the room OK.
+        let mut host_stream = crate::client_setup!(12005);
+        assert_msg!(host_stream, "I: 1\n");
+        assert_msg!(host_stream, "J: TIME\n");
+        assert_ping!(host_stream);
+
+        // Test that the correct number of pings come through before the room
+        // reaches it's time limit.
+        for _ in 0..13 {
+            advance(Duration::from_secs(9)).await;
+            assert_ping!(host_stream);
+        }
+
+        // Reach the room's time limit.
+        advance(Duration::from_secs(3)).await;
+
+        // Test that the room gives the sealed control signal, so that new
+        // clients cannot join the room.
+        let seal_signal = lobby_control_receiver.recv().await.unwrap();
+        assert_eq!(seal_signal, LobbyControl::SealRoom(room_code));
+
+        // Test that the correct close code is given to the host.
+        assert_close!(host_stream, CloseCode::Policy);
+        assert_end!(host_stream);
+
+        // Test that the room fully closes by giving the closed control signal.
+        let close_signal = lobby_control_receiver.recv().await.unwrap();
+        assert_eq!(close_signal, LobbyControl::CloseRoom(room_code));
+
+        // Send shutdown signal so the test server closes gracefully.
+        shutdown_sender
+            .send(())
+            .expect("failed to send shutdown signal");
+        handle.await.expect("task did not finish");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_time_limit_change() {
+        let room_code = "CHGE".try_into().unwrap();
+        let mut config = VariableConfig::default();
+        config.ping_interval_secs = 9;
+        config.room_time_limit_mins = 60;
+
+        let (lobby_control_sender, mut lobby_control_receiver) = mpsc::channel(1);
+        let (config_sender, config_receiver) = watch::channel(config);
+
+        let (handle, shutdown_sender) =
+            server_setup(12006, room_code, lobby_control_sender, config_receiver).await;
+
+        // Test that the host joins the room OK.
+        let mut host_stream = crate::client_setup!(12006);
+        assert_msg!(host_stream, "I: 1\n");
+        assert_msg!(host_stream, "J: CHGE\n");
+        assert_ping!(host_stream);
+
+        // Advance time by around 20 minutes.
+        for _ in 0..133 {
+            advance(Duration::from_secs(9)).await;
+            assert_ping!(host_stream);
+        }
+
+        // Change the room's time limit, but not by so much that the room should
+        // close.
+        config.room_time_limit_mins = 30;
+        config_sender
+            .send(config)
+            .expect("failed to send new config");
+        assert_ping!(host_stream);
+
+        // Advance time by around 5 minutes.
+        for _ in 0..33 {
+            advance(Duration::from_secs(9)).await;
+            assert_ping!(host_stream);
+        }
+
+        // Change the room's time limit again, but this time to a value lower
+        // than the room's elapsed time. This should close the room.
+        config.room_time_limit_mins = 20;
+        config_sender
+            .send(config)
+            .expect("failed to send new config");
+        assert_ping!(host_stream);
+
+        // Test that the room gives the sealed control signal, so that new
+        // clients cannot join the room.
+        let seal_signal = lobby_control_receiver.recv().await.unwrap();
+        assert_eq!(seal_signal, LobbyControl::SealRoom(room_code));
+
+        // Test that the correct close code is given to the host.
+        assert_close!(host_stream, CloseCode::Policy);
+        assert_end!(host_stream);
+
+        // Test that the room fully closes by giving the closed control signal.
         let close_signal = lobby_control_receiver.recv().await.unwrap();
         assert_eq!(close_signal, LobbyControl::CloseRoom(room_code));
 
