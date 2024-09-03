@@ -202,7 +202,8 @@ pub async fn lobby_task(mut context: LobbyContext) {
                                     room_code = RoomCode::random();
                                 }
 
-                                info!(%room_code, "creating room");
+                                let num_rooms = room_map.len() + 1;
+                                info!(%room_code, num_rooms, "creating room");
                                 let room_task = RoomTask::new(
                                     RoomContext {
                                         room_code,
@@ -319,8 +320,8 @@ pub async fn lobby_task(mut context: LobbyContext) {
 
                     match control {
                         LobbyControl::SealRoom(room_code) => {
-                            info!(%room_code, "sealing room");
                             if let Some(room_task) = room_map.get_mut(&room_code.into()) {
+                                info!(%room_code, "room sealed");
                                 room_task.is_sealed = true;
                             } else {
                                 error!(%room_code,
@@ -328,8 +329,10 @@ pub async fn lobby_task(mut context: LobbyContext) {
                             }
                         },
                         LobbyControl::CloseRoom(room_code) => {
-                            info!(%room_code, "removing room");
                             if let Some(mut room_task) = room_map.remove(&room_code.into()) {
+                                let num_rooms = room_map.len();
+                                info!(%room_code, num_rooms, "room closed");
+
                                 // Since it gave us the close signal, we can
                                 // safely assume that it's task is done.
                                 trace!("waiting for room task to finish");
