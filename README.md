@@ -13,7 +13,7 @@ a direct peer-to-peer connection with each other.
 ## Compiling
 
 To compile and run the server, you will need to install [Rust](https://www.rust-lang.org/tools/install)
-for your platform.
+for your platform, as well as [OpenSSL](https://docs.rs/openssl/latest/openssl/#automatic).
 
 ### Building
 
@@ -72,6 +72,11 @@ on which version of Tabletop Club you are using:
 
 3. In the main menu, click "Multiplayer", then "Host Game". Your local server
    should create a room, and give your game instance the room code.
+
+**NOTE:** The test certificate and private key provided will only work from
+`localhost`. If you wish to have other players connect to your instance, you
+will need to generate your own certificate and private key pair
+[using OpenSSL](https://stackoverflow.com/a/10176685).
 
 ### Tabletop Club v0.2.x+
 
