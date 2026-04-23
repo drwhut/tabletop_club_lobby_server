@@ -1779,11 +1779,11 @@ mod tests {
         match potentially_ping {
             Message::Ping(_) => {
                 assert_close!(host_stream, CloseCode::Policy);
-            },
+            }
             Message::Close(close) => {
                 let close = close.expect("expected close code");
                 assert_eq!(close.code, CloseCode::Policy);
-            },
+            }
             _ => {
                 panic!("expected message type to be ping or close");
             }
