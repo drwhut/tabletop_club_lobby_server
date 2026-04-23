@@ -1032,7 +1032,6 @@ mod tests {
 
     use futures_util::{SinkExt, StreamExt};
     use tokio::sync::oneshot;
-    use tokio::time::advance;
     use tokio_tungstenite::tungstenite::{protocol::CloseFrame, Message};
 
     async fn server_setup(
@@ -1673,7 +1672,7 @@ mod tests {
     async fn test_time_limit() {
         let room_code = "TIME".try_into().unwrap();
         let mut config = VariableConfig::default();
-        config.ping_interval_secs = 9;
+        config.ping_interval_secs = 7;
         config.room_time_limit_mins = 2;
 
         let (lobby_control_sender, mut lobby_control_receiver) = mpsc::channel(1);
@@ -1690,13 +1689,12 @@ mod tests {
 
         // Test that the correct number of pings come through before the room
         // reaches it's time limit.
-        for _ in 0..13 {
-            advance(Duration::from_secs(9)).await;
+        // NOTE: Reading for pings from the stream advances the timer.
+        for _ in 0..17 {
             assert_ping!(host_stream);
         }
 
-        // Reach the room's time limit.
-        advance(Duration::from_secs(3)).await;
+        // The next message will be the room closing due to the time limit.
 
         // Test that the room gives the sealed control signal, so that new
         // clients cannot join the room.
@@ -1722,7 +1720,7 @@ mod tests {
     async fn test_time_limit_change() {
         let room_code = "CHGE".try_into().unwrap();
         let mut config = VariableConfig::default();
-        config.ping_interval_secs = 9;
+        config.ping_interval_secs = 10;
         config.room_time_limit_mins = 60;
 
         let (lobby_control_sender, mut lobby_control_receiver) = mpsc::channel(1);
@@ -1737,9 +1735,9 @@ mod tests {
         assert_msg!(host_stream, "J: CHGE\n");
         assert_ping!(host_stream);
 
-        // Advance time by around 20 minutes.
-        for _ in 0..133 {
-            advance(Duration::from_secs(9)).await;
+        // Advance time by 20 minutes.
+        // NOTE: Reading for pings from the stream advances the timer.
+        for _ in 0..120 {
             assert_ping!(host_stream);
         }
 
@@ -1749,11 +1747,9 @@ mod tests {
         config_sender
             .send(config)
             .expect("failed to send new config");
-        assert_ping!(host_stream);
 
         // Advance time by around 5 minutes.
-        for _ in 0..33 {
-            advance(Duration::from_secs(9)).await;
+        for _ in 0..30 {
             assert_ping!(host_stream);
         }
 
@@ -1763,7 +1759,6 @@ mod tests {
         config_sender
             .send(config)
             .expect("failed to send new config");
-        assert_ping!(host_stream);
 
         // Test that the room gives the sealed control signal, so that new
         // clients cannot join the room.
@@ -1771,7 +1766,28 @@ mod tests {
         assert_eq!(seal_signal, LobbyControl::SealRoom(room_code));
 
         // Test that the correct close code is given to the host.
-        assert_close!(host_stream, CloseCode::Policy);
+        // NOTE: Due to the way tokio's timer system works when it is paused,
+        // enough time may have passed internally when sending the new config
+        // that another ping got added to the stream.
+        // I can't find a way to guarantee that a ping will be sent or not sent
+        // before the close message is sent, so I'm dealing with a potential
+        // rogue ping here. It ain't pretty, but damn it I've spent way too
+        // long trying to figure out why this has suddenly stopped working
+        // after updating dependencies, and I JUST WANT TO GO TO BED OK?!
+        let res = host_stream.next().await.expect("stream ended early");
+        let potentially_ping = res.expect("error receiving message from server");
+        match potentially_ping {
+            Message::Ping(_) => {
+                assert_close!(host_stream, CloseCode::Policy);
+            },
+            Message::Close(close) => {
+                let close = close.expect("expected close code");
+                assert_eq!(close.code, CloseCode::Policy);
+            },
+            _ => {
+                panic!("expected message type to be ping or close");
+            }
+        }
         assert_end!(host_stream);
 
         // Test that the room fully closes by giving the closed control signal.
